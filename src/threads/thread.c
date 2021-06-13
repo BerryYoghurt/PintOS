@@ -59,8 +59,8 @@ struct sleeping_thread
     struct list_elem elem;
     //struct thread *pointer; have a new idea, use semaphores instead of blocking/unblocking the thread yourself
     struct semaphore sem;
-    int64_t sleep_start;
-    int64_t sleep_duration;
+    //int64_t sleep_start;
+    //int64_t sleep_duration;
     int64_t wake_up_time;
   };
 
@@ -158,9 +158,9 @@ thread_tick (void)
 
     sleeping_thread = list_entry(element, struct sleeping_thread, elem);
     //printf("list element with wake up time = %lld\n", sleeping_thread->wake_up_time);
-    printf("<thread_tick>time elapsed = %lld subtraction = %lld",
+    /*printf("<thread_tick>time elapsed = %lld subtraction = %lld",
            timer_elapsed(sleeping_thread->sleep_start),
-           timer_ticks() - sleeping_thread->sleep_start);
+           timer_ticks() - sleeping_thread->sleep_start);*/
 
     if(sleeping_thread->wake_up_time <= now){
 
@@ -311,7 +311,7 @@ thread_sleep(int64_t sleep_start, int64_t sleep_duration){
   ASSERT(sleeping_thread != NULL) //what checks should I put here?
 
   //sleeping_thread->pointer = thread_current();
-  sema_init(&(sleeping_thread->sem),1);
+  sema_init(&(sleeping_thread->sem),0);
   sleeping_thread->wake_up_time = sleep_start + sleep_duration;
 
   lock_acquire(&sleeping_lock);
