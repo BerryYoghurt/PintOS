@@ -5,3 +5,4 @@ AUTHORS
 bochsrc.txt
 LICENSE
 Makefile
+/src/utils/*
