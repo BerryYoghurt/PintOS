@@ -309,14 +309,19 @@ thread_sleep(int64_t sleep_start, int64_t sleep_duration){
 
   printf("<thread_sleep>sleep for %lld ticks\n", sleep_duration);
   ASSERT(sleeping_thread != NULL) //what checks should I put here?
+  /*thread_sleep is only ever called from timer_sleep, and interrupts should be enabled*/
+  ASSERT(intr_get_level() == INTR_ON);
+  
 
   //sleeping_thread->pointer = thread_current();
   sema_init(&(sleeping_thread->sem),0);
   sleeping_thread->wake_up_time = sleep_start + sleep_duration;
 
+  printf("Calling lock_acquire not interrupt context\n");
+  ASSERT(!intr_context());
   lock_acquire(&sleeping_lock);
   //printf("inserting thread with wake up time = %lld\n", sleeping_thread->wake_up_time);
-  list_insert_ordered(&sleeping_threads,&(sleeping_thread->elem), sleep_cmp, NULL);
+  list_insert_ordered(&sleeping_threads, &(sleeping_thread->elem), sleep_cmp, NULL);
   lock_release(&sleeping_lock);
 
   sema_down(&(sleeping_thread->sem));

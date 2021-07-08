@@ -94,7 +94,6 @@ timer_sleep (int64_t ticks)
 
   ASSERT (intr_get_level () == INTR_ON);
 
-  //printf("<timer_sleep>sleep for %lld ticks\n", ticks);
   thread_sleep(start,  ticks);
 }
 
