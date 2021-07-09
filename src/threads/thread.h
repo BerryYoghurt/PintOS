@@ -87,7 +87,7 @@ struct thread
     enum thread_status status;          /* Thread state. */
     char name[16];                      /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
-    int priority;                       /* Priority. */
+    int priority;                       /* _Effective_ Priority. */
     struct list_elem allelem;           /* List element for all threads list. */
 
     /* priority donation */
@@ -111,6 +111,8 @@ struct thread
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
+/* all initialisation done*/
+extern bool normal_execution;
 
 void thread_init (void);
 void thread_start (void);
@@ -128,6 +130,7 @@ void thread_sleep(int64_t sleep_start, int64_t sleep_duration);
 struct thread *thread_current (void);
 tid_t thread_tid (void);
 const char *thread_name (void);
+bool is_normal_thread (void);
 
 void thread_exit (void) NO_RETURN;
 void thread_yield (void);
@@ -138,6 +141,7 @@ void thread_foreach (thread_action_func *, void *);
 
 int thread_get_priority (void);
 void thread_set_priority (int);
+list_less_func thread_priority_cmp;
 
 int thread_get_nice (void);
 void thread_set_nice (int);

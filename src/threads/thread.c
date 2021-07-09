@@ -105,6 +105,8 @@ static list_less_func sleep_cmp;
 void
 thread_init (void) 
 {
+  printf("<thread_init>\n");
+  normal_execution = false;
   ASSERT (intr_get_level () == INTR_OFF);
 
   lock_init (&tid_lock);
@@ -125,6 +127,7 @@ thread_init (void)
 void
 thread_start (void) 
 {
+  printf("finished thread_init, malloc_init, all until thread_start peacefully\n");
   /* Create the idle thread. */
   struct semaphore idle_started;
   sema_init (&idle_started, 0);
@@ -206,6 +209,7 @@ tid_t
 thread_create (const char *name, int priority,
                thread_func *function, void *aux) 
 {
+  printf("<thread create>\n");
   struct thread *t;
   struct kernel_thread_frame *kf;
   struct switch_entry_frame *ef;
@@ -240,6 +244,7 @@ thread_create (const char *name, int priority,
 
   /* Add to run queue. */
   thread_unblock (t);
+  printf("created thread %s\n", name);
 
   return tid;
 }
@@ -308,7 +313,8 @@ thread_sleep(int64_t sleep_start, int64_t sleep_duration){
   //printf("<thread_sleep>\n");
   struct sleeping_thread* sleeping_thread = (struct sleeping_thread*) malloc(sizeof (struct sleeping_thread));
 
-  ASSERT(sleeping_thread != NULL) //what other checks should I put here?
+  //printf("idle thread id = %d initial thread id = %d \n", idle_thread)
+  ASSERT(sleeping_thread != NULL) //what checks should I put here?
   /*thread_sleep is only ever called from timer_sleep, and interrupts should be enabled*/
   ASSERT(intr_get_level() == INTR_ON);
   
@@ -364,6 +370,14 @@ tid_t
 thread_tid (void) 
 {
   return thread_current ()->tid;
+}
+
+bool
+is_normal_thread (void)
+{
+  /*return thread_current ()->tid != idle_thread->tid 
+        && thread_current ()->tid != initial_thread->tid;*/
+  return normal_execution;
 }
 
 /* Deschedules the current thread and destroys it.  Never
@@ -426,8 +440,8 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority) 
 {
-  //printf("<set_priority>\n");
   if(!thread_mlfqs){
+    //do not have to check normal thread becasue no promotion takes place
     //the thread is certainly not waiting on any lock (or else it
     //would not be able to set its priority), but may be holding locks.
     //If it's holding locks, its effective priority should be the maximum
@@ -448,6 +462,16 @@ int
 thread_get_priority (void) 
 {
   return thread_current ()->priority;
+}
+
+bool thread_priority_cmp(const struct list_elem *a,
+                             const struct list_elem *b,
+                             void *aux UNUSED){
+  
+  struct thread *thread_a = list_entry(a, struct thread, elem);
+  struct thread *thread_b = list_entry(b, struct thread, elem);
+
+  return thread_a->priority > thread_b->priority;
 }
 
 /* Sets the current thread's nice value to NICE. */
@@ -547,6 +571,8 @@ running_thread (void)
 static bool
 is_thread (struct thread *t)
 {
+  ASSERT(t != NULL);
+  ASSERT(t->magic == THREAD_MAGIC);//just so that it would print a maessage
   return t != NULL && t->magic == THREAD_MAGIC;
 }
 
@@ -555,6 +581,7 @@ is_thread (struct thread *t)
 static void
 init_thread (struct thread *t, const char *name, int priority)
 {
+  printf("<init thread>\n");
   enum intr_level old_level;
 
   ASSERT (t != NULL);
@@ -567,9 +594,12 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   if(!thread_mlfqs){
+    printf("<inti_thread> setting priority params\n");
     t->original_priority = priority;
     list_init(&t->locks_held);
+    t->waiting_on = NULL;
   }
+  printf("<init_thread>finished priority params\n");
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
@@ -600,8 +630,12 @@ next_thread_to_run (void)
 {
   if (list_empty (&ready_list))
     return idle_thread;
-  else
-    return list_entry (list_pop_front (&ready_list), struct thread, elem);
+  else{
+    //whether mlfq or round robin, both choose highest effective priority
+    struct list_elem *thread_elem = list_min(&ready_list, thread_priority_cmp, NULL);
+    list_remove(thread_elem);
+    return list_entry (thread_elem, struct thread, elem);
+  }
 }
 
 /* Completes a thread switch by activating the new thread's page

@@ -115,9 +115,14 @@ sema_up (struct semaphore *sema)
   ASSERT (sema != NULL);
 
   old_level = intr_disable ();
-  if (!list_empty (&sema->waiters)) 
-    thread_unblock (list_entry (list_pop_front (&sema->waiters),
+  if (!list_empty (&sema->waiters)){ 
+    struct list_elem *thread_elem = list_min(&sema->waiters,
+                                             thread_priority_cmp, 
+                                             NULL);
+    list_remove(thread_elem);
+    thread_unblock (list_entry (thread_elem,
                                 struct thread, elem));
+  }
   sema->value++;
   intr_set_level (old_level);
 }
@@ -181,6 +186,7 @@ lock_init (struct lock *lock)
 
   lock->holder = NULL;
   sema_init (&lock->semaphore, 1);
+  sema_init (&lock->protection, 1);
 }
 
 /* Acquires LOCK, sleeping until it becomes available if
@@ -197,13 +203,25 @@ lock_acquire (struct lock *lock)
   ASSERT (lock != NULL);
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
+  ASSERT (thread_current ()->waiting_on == NULL);
+  printf("<lock acquire> tid = %d\n", thread_current ()->tid);
 
-  sema_down (&lock->semaphore);
-  lock->holder = thread_current ();
+  if(!thread_mlfqs && is_normal_thread ()){
+    thread_current ()->waiting_on = lock;
+    lock_promote(lock, thread_current ()->priority);
 
-  if(!thread_mlfqs){
-    //by definition, this thread now has the highest priority of the waiters
+    sema_down (&lock->semaphore);
+    //lock acquired
+    lock->holder = thread_current ();
+    thread_current ()->waiting_on = NULL;
+    list_push_front(&thread_current ()->locks_held, &lock->elem);
+
+    //by definition, this thread now has the highest priority of the waiters,
+    //set the lock priority to the thread's ORIGINAL priority
     lock->priority = thread_current ()->original_priority;
+  }else{
+    sema_down (&lock->semaphore);
+    lock->holder = thread_current ();
   }
 }
 
@@ -220,11 +238,17 @@ lock_try_acquire (struct lock *lock)
 
   ASSERT (lock != NULL);
   ASSERT (!lock_held_by_current_thread (lock));
+  ASSERT (thread_current ()->waiting_on == NULL);
+  printf("<lock try acquire>\n");
 
   success = sema_try_down (&lock->semaphore);
   if (success){
     lock->holder = thread_current ();
-    lock->priority = thread_current ()->original_priority;
+
+    if(!thread_mlfqs && is_normal_thread ()){
+      lock->priority = thread_current ()->original_priority;
+      list_push_front(&thread_current ()->locks_held, &lock->elem);
+    }
   }
   return success;
 }
@@ -239,8 +263,21 @@ lock_release (struct lock *lock)
 {
   ASSERT (lock != NULL);
   ASSERT (lock_held_by_current_thread (lock));
+  ASSERT (thread_current ()->waiting_on == NULL);
 
   lock->holder = NULL;
+  if(!thread_mlfqs && is_normal_thread ()){
+    lock->priority = -1;
+    list_remove(&lock->elem);
+
+    int highest_priority_lock = lock_max(&thread_current ()->locks_held);
+    if(highest_priority_lock > thread_current ()->original_priority){
+      thread_current ()->priority = highest_priority_lock;
+    }else{
+      thread_current ()->priority = thread_current ()->original_priority;
+    }
+  }
+  
   sema_up (&lock->semaphore);
 }
 
@@ -269,6 +306,7 @@ bool lock_priority_cmp(const struct list_elem *a, const struct list_elem *b, voi
 int lock_max(struct list* lock_list)
 {
   ASSERT(!thread_mlfqs); //lock priority doesn't make sense otherwise
+  ASSERT(is_normal_thread ());
 
   struct list_elem* lock_elem = list_min(lock_list, lock_priority_cmp, NULL);
   if(lock_elem != list_tail(lock_list))
@@ -278,10 +316,35 @@ int lock_max(struct list* lock_list)
 }
 
 /* Promotes the lock to the new priority if higher than the current,
-  and ripples to the holder of the lock, and so on*/
-void lock_promote(int new_priority)
+  and ripples to the holder of the lock, and so on
+  TODO, could impose a limit on recusion depth if needed*/
+void lock_promote(struct lock *lock, int new_priority)
 {
   ASSERT(!thread_mlfqs);
+  ASSERT(lock != NULL);
+  ASSERT(is_normal_thread ());
+
+  sema_down(&lock->protection);
+
+  if(new_priority > lock->priority){
+    printf("lock promoted from %d to %d\n",lock->priority, new_priority);
+    lock->priority = new_priority;
+
+    if(new_priority > lock->holder->priority){
+      printf("holder %s promoted from %d to %d\n", lock->holder->name, 
+                                                   lock->holder->priority, 
+                                                   new_priority);
+      lock->holder->priority = new_priority;
+
+      if(lock->holder->waiting_on != NULL){
+        sema_up(&lock->protection);
+        lock_promote(lock->holder->waiting_on, new_priority);
+        return;
+      }
+    }
+  }
+
+  sema_up(&lock->protection);
 }
 
 

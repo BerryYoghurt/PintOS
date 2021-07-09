@@ -26,7 +26,10 @@ struct lock
     /*priority donation*/
     int priority;               /* maximum of (priority of holder, priority of
                                    waiters on this particular lock)*/
-    struct list_elem elem;
+    struct list_elem elem;      /* element for locks_held list*/
+    struct semaphore protection;/* binary semaphore to protect against race conditions
+                                   if more than one thread want to acqure the lock at
+                                   the same time and all try to promote it*/
   };
 
 void lock_init (struct lock *);
@@ -35,7 +38,7 @@ bool lock_try_acquire (struct lock *);
 void lock_release (struct lock *);
 bool lock_held_by_current_thread (const struct lock *);
 int lock_max(struct list*);
-void lock_promote(int);
+void lock_promote(struct lock*, int);
 
 /* Condition variable. */
 struct condition 
