@@ -90,6 +90,11 @@ struct thread
     int priority;                       /* Priority. */
     struct list_elem allelem;           /* List element for all threads list. */
 
+    /* priority donation */
+    int original_priority;              /* Priority without any donations. */
+    struct list locks_held;             /* locks held by this thread */
+    struct lock* waiting_on;            /* lock this thread is waiting on (NULL if none)*/
+
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 

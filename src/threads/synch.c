@@ -32,6 +32,8 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 
+static list_less_func lock_priority_cmp;
+
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
    manipulating it:
@@ -196,10 +198,13 @@ lock_acquire (struct lock *lock)
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
 
-  //printf("in lock acquire\n");
-
   sema_down (&lock->semaphore);
   lock->holder = thread_current ();
+
+  if(!thread_mlfqs){
+    //by definition, this thread now has the highest priority of the waiters
+    lock->priority = thread_current ()->original_priority;
+  }
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -217,8 +222,10 @@ lock_try_acquire (struct lock *lock)
   ASSERT (!lock_held_by_current_thread (lock));
 
   success = sema_try_down (&lock->semaphore);
-  if (success)
+  if (success){
     lock->holder = thread_current ();
+    lock->priority = thread_current ()->original_priority;
+  }
   return success;
 }
 
@@ -247,6 +254,36 @@ lock_held_by_current_thread (const struct lock *lock)
 
   return lock->holder == thread_current ();
 }
+
+/* Comparator for lock priorities, 
+  returns true if lock a has a higher priority*/
+bool lock_priority_cmp(const struct list_elem *a, const struct list_elem *b, void* aux UNUSED)
+{
+  struct lock* lock_a = list_entry(a, struct lock, elem);
+  struct lock* lock_b = list_entry(b, struct lock, elem);
+  return lock_a->priority > lock_b->priority;
+}
+
+/* Returns the priority of thehighest priority lock in a list, 
+   or -1 if the list is empty*/
+int lock_max(struct list* lock_list)
+{
+  ASSERT(!thread_mlfqs); //lock priority doesn't make sense otherwise
+
+  struct list_elem* lock_elem = list_min(lock_list, lock_priority_cmp, NULL);
+  if(lock_elem != list_tail(lock_list))
+    return list_entry(lock_elem, struct lock, elem)->priority;
+  else
+    return -1;
+}
+
+/* Promotes the lock to the new priority if higher than the current,
+  and ripples to the holder of the lock, and so on*/
+void lock_promote(int new_priority)
+{
+  ASSERT(!thread_mlfqs);
+}
+
 
 /* One semaphore in a list. */
 struct semaphore_elem 

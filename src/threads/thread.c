@@ -57,10 +57,8 @@ struct kernel_thread_frame
 struct sleeping_thread
   {
     struct list_elem elem;
-    //struct thread *pointer; have a new idea, use semaphores instead of blocking/unblocking the thread yourself
+    int priority;
     struct semaphore sem;
-    //int64_t sleep_start;
-    //int64_t sleep_duration;
     int64_t wake_up_time;
   };
 
@@ -148,19 +146,13 @@ thread_tick (void)
 
   /*wake up all threads that should wake up now or should have waken up before*/
   int64_t now = timer_ticks();
-
-  //printf("ticks now = %lld\n", now);
-
+  //printf("<thread_tick>\n");
   //no need for semaphore because this function runs in an interrupt context anyway
   struct list_elem *element = list_begin(&sleeping_threads);
   struct sleeping_thread *sleeping_thread;
   while(element != list_end(&sleeping_threads)){
 
     sleeping_thread = list_entry(element, struct sleeping_thread, elem);
-    //printf("list element with wake up time = %lld\n", sleeping_thread->wake_up_time);
-    /*printf("<thread_tick>time elapsed = %lld subtraction = %lld",
-           timer_elapsed(sleeping_thread->sleep_start),
-           timer_ticks() - sleeping_thread->sleep_start);*/
 
     if(sleeping_thread->wake_up_time <= now){
 
@@ -290,7 +282,14 @@ thread_unblock (struct thread *t)
   intr_set_level (old_level);
 }
 
-/*comparator for sleeping threads*/
+/* comparator for sleeping threads
+  returns true if waking up time of thread a is before thread b
+  or both wake up at the same time but the priority of a is more than b.
+
+  I don't think I must recalculate the priority while the thread is sleeping
+  because (in the case of priority donation) the thread will certainly wake up
+  within a certain time frame, after which the scheduler sees its elevated priority.
+  Same thing for priority changes due to mlfq I guess.*/
 bool sleep_cmp(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED){
   struct sleeping_thread* thread_a = 
                   list_entry(a, struct sleeping_thread, elem);
@@ -298,16 +297,18 @@ bool sleep_cmp(const struct list_elem *a, const struct list_elem *b, void *aux U
   struct sleeping_thread* thread_b = 
                   list_entry(b, struct sleeping_thread, elem);
   
-  return thread_a->wake_up_time < thread_b->wake_up_time;
+  return thread_a->wake_up_time < thread_b->wake_up_time ||
+           (thread_a->wake_up_time == thread_b->wake_up_time && 
+            thread_a->priority > thread_b->priority);
 }
 
 /*Adds the thread to sleeping list and blocks it.*/
 void
 thread_sleep(int64_t sleep_start, int64_t sleep_duration){
+  //printf("<thread_sleep>\n");
   struct sleeping_thread* sleeping_thread = (struct sleeping_thread*) malloc(sizeof (struct sleeping_thread));
 
-  //printf("<thread_sleep>sleep for %lld ticks\n", sleep_duration);
-  ASSERT(sleeping_thread != NULL) //what checks should I put here?
+  ASSERT(sleeping_thread != NULL) //what other checks should I put here?
   /*thread_sleep is only ever called from timer_sleep, and interrupts should be enabled*/
   ASSERT(intr_get_level() == INTR_ON);
   
@@ -315,18 +316,20 @@ thread_sleep(int64_t sleep_start, int64_t sleep_duration){
   //sleeping_thread->pointer = thread_current();
   sema_init(&(sleeping_thread->sem),0);
   sleeping_thread->wake_up_time = sleep_start + sleep_duration;
+  if(!thread_mlfqs){
+    sleeping_thread->priority = thread_current ()->original_priority;
+  }else{
+    sleeping_thread->priority = thread_current ()->priority;
+  }
 
-  //printf("Calling lock_acquire not interrupt context\n");
+  ASSERT(thread_current());
   ASSERT(!intr_context());
   lock_acquire(&sleeping_lock);
-
-  //printf("inserting thread with wake up time = %lld\n", sleeping_thread->wake_up_time);
-
   list_insert_ordered(&sleeping_threads, &(sleeping_thread->elem), sleep_cmp, NULL);
   lock_release(&sleeping_lock);
 
   sema_down(&(sleeping_thread->sem));
-  //printf("thread woke up\n");
+  //thread woke up
   free(sleeping_thread);
 }
 
@@ -423,7 +426,21 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority) 
 {
-  thread_current ()->priority = new_priority;
+  //printf("<set_priority>\n");
+  if(!thread_mlfqs){
+    //the thread is certainly not waiting on any lock (or else it
+    //would not be able to set its priority), but may be holding locks.
+    //If it's holding locks, its effective priority should be the maximum
+    //of held locks and new_priority
+    thread_current ()->original_priority = new_priority;
+    int highest_lock_priority = lock_max(&thread_current ()->locks_held);
+    if(highest_lock_priority > new_priority){
+      thread_current ()->priority = highest_lock_priority;
+    }else{
+      thread_current ()->priority = new_priority;
+    }
+  }else
+    thread_current ()->priority = new_priority;
 }
 
 /* Returns the current thread's priority. */
@@ -549,6 +566,10 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  if(!thread_mlfqs){
+    t->original_priority = priority;
+    list_init(&t->locks_held);
+  }
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
