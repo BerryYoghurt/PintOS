@@ -186,7 +186,8 @@ lock_init (struct lock *lock)
 
   lock->holder = NULL;
   sema_init (&lock->semaphore, 1);
-  sema_init (&lock->protection, 1);
+  if(!thread_mlfqs)
+    sema_init (&lock->protection, 1);
 }
 
 /* Acquires LOCK, sleeping until it becomes available if
@@ -203,12 +204,12 @@ lock_acquire (struct lock *lock)
   ASSERT (lock != NULL);
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
-  ASSERT (thread_current ()->waiting_on == NULL);
-  printf("<lock acquire> tid = %d\n", thread_current ()->tid);
 
-  if(!thread_mlfqs && is_normal_thread ()){
+
+  if(!thread_mlfqs){
+    ASSERT (thread_current ()->waiting_on == NULL);
     thread_current ()->waiting_on = lock;
-    lock_promote(lock, thread_current ()->priority);
+    //lock_promote(lock, thread_current ()->priority);
 
     sema_down (&lock->semaphore);
     //lock acquired
@@ -223,6 +224,7 @@ lock_acquire (struct lock *lock)
     sema_down (&lock->semaphore);
     lock->holder = thread_current ();
   }
+
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -245,7 +247,7 @@ lock_try_acquire (struct lock *lock)
   if (success){
     lock->holder = thread_current ();
 
-    if(!thread_mlfqs && is_normal_thread ()){
+    if(!thread_mlfqs){
       lock->priority = thread_current ()->original_priority;
       list_push_front(&thread_current ()->locks_held, &lock->elem);
     }
@@ -266,7 +268,9 @@ lock_release (struct lock *lock)
   ASSERT (thread_current ()->waiting_on == NULL);
 
   lock->holder = NULL;
-  if(!thread_mlfqs && is_normal_thread ()){
+
+  if(!thread_mlfqs){
+
     lock->priority = -1;
     list_remove(&lock->elem);
 
@@ -277,6 +281,7 @@ lock_release (struct lock *lock)
       thread_current ()->priority = thread_current ()->original_priority;
     }
   }
+
   
   sema_up (&lock->semaphore);
 }
@@ -306,7 +311,7 @@ bool lock_priority_cmp(const struct list_elem *a, const struct list_elem *b, voi
 int lock_max(struct list* lock_list)
 {
   ASSERT(!thread_mlfqs); //lock priority doesn't make sense otherwise
-  ASSERT(is_normal_thread ());
+  //ASSERT(is_normal_thread ());
 
   struct list_elem* lock_elem = list_min(lock_list, lock_priority_cmp, NULL);
   if(lock_elem != list_tail(lock_list))
@@ -320,7 +325,7 @@ int lock_max(struct list* lock_list)
   TODO, could impose a limit on recusion depth if needed*/
 void lock_promote(struct lock *lock, int new_priority)
 {
-  ASSERT(!thread_mlfqs);
+  /*ASSERT(!thread_mlfqs);
   ASSERT(lock != NULL);
   ASSERT(is_normal_thread ());
 
@@ -344,7 +349,8 @@ void lock_promote(struct lock *lock, int new_priority)
     }
   }
 
-  sema_up(&lock->protection);
+  sema_up(&lock->protection);*/
+
 }
 
 

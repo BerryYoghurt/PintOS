@@ -111,8 +111,6 @@ struct thread
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
-/* all initialisation done*/
-extern bool normal_execution;
 
 void thread_init (void);
 void thread_start (void);
@@ -130,7 +128,6 @@ void thread_sleep(int64_t sleep_start, int64_t sleep_duration);
 struct thread *thread_current (void);
 tid_t thread_tid (void);
 const char *thread_name (void);
-bool is_normal_thread (void);
 
 void thread_exit (void) NO_RETURN;
 void thread_yield (void);

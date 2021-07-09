@@ -75,6 +75,8 @@ static unsigned thread_ticks;   /* # of timer ticks since last yield. */
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 bool thread_mlfqs;
+/*flag that marks all boot complete*/
+bool normal_execution;
 
 static void kernel_thread (thread_func *, void *aux);
 
@@ -106,7 +108,6 @@ void
 thread_init (void) 
 {
   printf("<thread_init>\n");
-  normal_execution = false;
   ASSERT (intr_get_level () == INTR_OFF);
 
   lock_init (&tid_lock);
@@ -209,7 +210,7 @@ tid_t
 thread_create (const char *name, int priority,
                thread_func *function, void *aux) 
 {
-  printf("<thread create>\n");
+  //printf("<thread create>\n");
   struct thread *t;
   struct kernel_thread_frame *kf;
   struct switch_entry_frame *ef;
@@ -244,7 +245,6 @@ thread_create (const char *name, int priority,
 
   /* Add to run queue. */
   thread_unblock (t);
-  printf("created thread %s\n", name);
 
   return tid;
 }
@@ -319,7 +319,6 @@ thread_sleep(int64_t sleep_start, int64_t sleep_duration){
   ASSERT(intr_get_level() == INTR_ON);
   
 
-  //sleeping_thread->pointer = thread_current();
   sema_init(&(sleeping_thread->sem),0);
   sleeping_thread->wake_up_time = sleep_start + sleep_duration;
   if(!thread_mlfqs){
@@ -370,14 +369,6 @@ tid_t
 thread_tid (void) 
 {
   return thread_current ()->tid;
-}
-
-bool
-is_normal_thread (void)
-{
-  /*return thread_current ()->tid != idle_thread->tid 
-        && thread_current ()->tid != initial_thread->tid;*/
-  return normal_execution;
 }
 
 /* Deschedules the current thread and destroys it.  Never
@@ -473,6 +464,7 @@ bool thread_priority_cmp(const struct list_elem *a,
 
   return thread_a->priority > thread_b->priority;
 }
+
 
 /* Sets the current thread's nice value to NICE. */
 void
@@ -572,7 +564,7 @@ static bool
 is_thread (struct thread *t)
 {
   ASSERT(t != NULL);
-  ASSERT(t->magic == THREAD_MAGIC);//just so that it would print a maessage
+  ASSERT(t->magic == THREAD_MAGIC);//just so that it would print a message
   return t != NULL && t->magic == THREAD_MAGIC;
 }
 
@@ -581,7 +573,6 @@ is_thread (struct thread *t)
 static void
 init_thread (struct thread *t, const char *name, int priority)
 {
-  printf("<init thread>\n");
   enum intr_level old_level;
 
   ASSERT (t != NULL);
@@ -594,12 +585,11 @@ init_thread (struct thread *t, const char *name, int priority)
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
   if(!thread_mlfqs){
-    printf("<inti_thread> setting priority params\n");
     t->original_priority = priority;
     list_init(&t->locks_held);
     t->waiting_on = NULL;
   }
-  printf("<init_thread>finished priority params\n");
+
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
