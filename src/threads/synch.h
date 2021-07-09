@@ -30,6 +30,7 @@ struct lock
     struct semaphore protection;/* binary semaphore to protect against race conditions
                                    if more than one thread want to acqure the lock at
                                    the same time and all try to promote it*/
+    int id;
   };
 
 void lock_init (struct lock *);

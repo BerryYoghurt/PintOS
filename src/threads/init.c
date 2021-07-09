@@ -198,6 +198,7 @@ read_command_line (void)
   char *p, *end;
   int argc;
   int i;
+  
 
   argc = *(uint32_t *) ptov (LOADER_ARG_CNT);
   p = ptov (LOADER_ARGS);

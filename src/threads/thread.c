@@ -107,7 +107,7 @@ static list_less_func sleep_cmp;
 void
 thread_init (void) 
 {
-  printf("<thread_init>\n");
+  //printf("<thread_init>\n");
   ASSERT (intr_get_level () == INTR_OFF);
 
   lock_init (&tid_lock);
@@ -121,6 +121,7 @@ thread_init (void)
   init_thread (initial_thread, "main", PRI_DEFAULT);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid ();
+  //printf("</thread_init>\n");
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -128,7 +129,7 @@ thread_init (void)
 void
 thread_start (void) 
 {
-  printf("finished thread_init, malloc_init, all until thread_start peacefully\n");
+  //printf("<thread_start>\n");
   /* Create the idle thread. */
   struct semaphore idle_started;
   sema_init (&idle_started, 0);
@@ -139,6 +140,7 @@ thread_start (void)
 
   /* Wait for the idle thread to initialize idle_thread. */
   sema_down (&idle_started);
+  //printf("</thread_start>\n");
 }
 
 /* Called by the timer interrupt handler at each timer tick.
@@ -146,11 +148,11 @@ thread_start (void)
 void
 thread_tick (void) 
 {
+  //printf("<thread_tick>\n");
   struct thread *t = thread_current ();
 
   /*wake up all threads that should wake up now or should have waken up before*/
   int64_t now = timer_ticks();
-  //printf("<thread_tick>\n");
   //no need for semaphore because this function runs in an interrupt context anyway
   struct list_elem *element = list_begin(&sleeping_threads);
   struct sleeping_thread *sleeping_thread;
@@ -181,6 +183,8 @@ thread_tick (void)
   /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
+  
+  //printf("</thread_tick>\n");
 }
 
 /* Prints thread statistics. */
@@ -245,6 +249,9 @@ thread_create (const char *name, int priority,
 
   /* Add to run queue. */
   thread_unblock (t);
+  thread_yield();
+  //printf("thread size = %d\n", sizeof(struct thread));
+  //printf("</thread create>\n");
 
   return tid;
 }
@@ -258,11 +265,13 @@ thread_create (const char *name, int priority,
 void
 thread_block (void) 
 {
+  //printf("<thread_block>\n");
   ASSERT (!intr_context ());
   ASSERT (intr_get_level () == INTR_OFF);
 
   thread_current ()->status = THREAD_BLOCKED;
   schedule ();
+  //printf("</thread_block>\n");
 }
 
 /* Transitions a blocked thread T to the ready-to-run state.
@@ -276,6 +285,7 @@ thread_block (void)
 void
 thread_unblock (struct thread *t) 
 {
+  //printf("<thread_unblock>\n");
   enum intr_level old_level;
 
   ASSERT (is_thread (t));
@@ -285,6 +295,7 @@ thread_unblock (struct thread *t)
   list_push_back (&ready_list, &t->elem);
   t->status = THREAD_READY;
   intr_set_level (old_level);
+  //printf("</thread_unblock>\n");
 }
 
 /* comparator for sleeping threads
@@ -311,6 +322,7 @@ bool sleep_cmp(const struct list_elem *a, const struct list_elem *b, void *aux U
 void
 thread_sleep(int64_t sleep_start, int64_t sleep_duration){
   //printf("<thread_sleep>\n");
+  //debug_backtrace_all();
   struct sleeping_thread* sleeping_thread = (struct sleeping_thread*) malloc(sizeof (struct sleeping_thread));
 
   //printf("idle thread id = %d initial thread id = %d \n", idle_thread)
@@ -336,6 +348,7 @@ thread_sleep(int64_t sleep_start, int64_t sleep_duration){
   sema_down(&(sleeping_thread->sem));
   //thread woke up
   free(sleeping_thread);
+  //printf("</thread_sleep>\n");
 }
 
 /* Returns the name of the running thread. */
@@ -397,6 +410,7 @@ thread_exit (void)
 void
 thread_yield (void) 
 {
+  //printf("<thread_yield>\n");
   struct thread *cur = thread_current ();
   enum intr_level old_level;
   
@@ -408,6 +422,7 @@ thread_yield (void)
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
+  //printf("</thread_yield>\n");
 }
 
 /* Invoke function 'func' on all threads, passing along 'aux'.
@@ -415,6 +430,7 @@ thread_yield (void)
 void
 thread_foreach (thread_action_func *func, void *aux)
 {
+  //printf("<thread_foreach>\n");
   struct list_elem *e;
 
   ASSERT (intr_get_level () == INTR_OFF);
@@ -425,27 +441,39 @@ thread_foreach (thread_action_func *func, void *aux)
       struct thread *t = list_entry (e, struct thread, allelem);
       func (t, aux);
     }
+  //printf("</thread_foreach>\n");
 }
 
-/* Sets the current thread's priority to NEW_PRIORITY. */
+/* Sets the current thread's priority to NEW_PRIORITY.
+  Does nothing if mlfqs */
 void
 thread_set_priority (int new_priority) 
 {
+  /*the thread is certainly not waiting on any lock (or else it
+     would not be able to set its priority), but may be holding locks.
+     If it's holding locks, its effective priority should be the maximum
+     of held locks and new_priority*/
+
+  ASSERT(thread_current ()->waiting_on == NULL);
+  //printf("<thread_set_priority>\n");
+
   if(!thread_mlfqs){
-    //do not have to check normal thread becasue no promotion takes place
-    //the thread is certainly not waiting on any lock (or else it
-    //would not be able to set its priority), but may be holding locks.
-    //If it's holding locks, its effective priority should be the maximum
-    //of held locks and new_priority
+    int old_effective_priority = thread_current ()->priority;
     thread_current ()->original_priority = new_priority;
     int highest_lock_priority = lock_max(&thread_current ()->locks_held);
+
     if(highest_lock_priority > new_priority){
       thread_current ()->priority = highest_lock_priority;
     }else{
       thread_current ()->priority = new_priority;
+    } 
+
+    if(old_effective_priority > thread_current ()->priority){
+      thread_yield();
     }
-  }else
-    thread_current ()->priority = new_priority;
+  }
+
+  //printf("</thread_set_priority>\n");
 }
 
 /* Returns the current thread's priority. */
@@ -573,6 +601,7 @@ is_thread (struct thread *t)
 static void
 init_thread (struct thread *t, const char *name, int priority)
 {
+  //printf("<init_thread>\n");
   enum intr_level old_level;
 
   ASSERT (t != NULL);
@@ -588,6 +617,7 @@ init_thread (struct thread *t, const char *name, int priority)
     t->original_priority = priority;
     list_init(&t->locks_held);
     t->waiting_on = NULL;
+    //printf("waiting on %p\n",t->waiting_on);
   }
 
   t->magic = THREAD_MAGIC;
@@ -595,6 +625,7 @@ init_thread (struct thread *t, const char *name, int priority)
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
   intr_set_level (old_level);
+  //printf("</init_thread>\n");
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and

@@ -33,6 +33,7 @@
 #include "threads/thread.h"
 
 static list_less_func lock_priority_cmp;
+//static int lock_allocate_id(void);
 
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
@@ -46,10 +47,12 @@ static list_less_func lock_priority_cmp;
 void
 sema_init (struct semaphore *sema, unsigned value) 
 {
+  //printf("<sema_init>\n");
   ASSERT (sema != NULL);
 
   sema->value = value;
   list_init (&sema->waiters);
+  //printf("</sema_init>\n");
 }
 
 /* Down or "P" operation on a semaphore.  Waits for SEMA's value
@@ -62,6 +65,7 @@ sema_init (struct semaphore *sema, unsigned value)
 void
 sema_down (struct semaphore *sema) 
 {
+  //printf("<sema_down>\n");
   enum intr_level old_level;
 
   ASSERT (sema != NULL);
@@ -75,6 +79,7 @@ sema_down (struct semaphore *sema)
     }
   sema->value--;
   intr_set_level (old_level);
+  //printf("</sema_down>\n");
 }
 
 /* Down or "P" operation on a semaphore, but only if the
@@ -85,6 +90,7 @@ sema_down (struct semaphore *sema)
 bool
 sema_try_down (struct semaphore *sema) 
 {
+  //printf("<sema_try_down>\n");
   enum intr_level old_level;
   bool success;
 
@@ -99,6 +105,7 @@ sema_try_down (struct semaphore *sema)
   else
     success = false;
   intr_set_level (old_level);
+  //printf("</sema_try_down>\n");
 
   return success;
 }
@@ -110,6 +117,7 @@ sema_try_down (struct semaphore *sema)
 void
 sema_up (struct semaphore *sema) 
 {
+  //printf("<sema_up>\n");
   enum intr_level old_level;
 
   ASSERT (sema != NULL);
@@ -125,6 +133,12 @@ sema_up (struct semaphore *sema)
   }
   sema->value++;
   intr_set_level (old_level);
+  if(intr_context ()){
+    intr_yield_on_return();
+  }else{
+    thread_yield();
+  }
+  //printf("</sema_up>\n");
 }
 
 static void sema_test_helper (void *sema_);
@@ -182,13 +196,21 @@ sema_test_helper (void *sema_)
 void
 lock_init (struct lock *lock)
 {
+  //printf("<lock_init>\n");
   ASSERT (lock != NULL);
 
   lock->holder = NULL;
   sema_init (&lock->semaphore, 1);
   if(!thread_mlfqs)
     sema_init (&lock->protection, 1);
+  //printf("</lock_init>\n");
+  //lock->id = lock_allocate_id();
 }
+
+/*int lock_allocate_id(){
+  static id = 1000;
+  return id++;
+}*/
 
 /* Acquires LOCK, sleeping until it becomes available if
    necessary.  The lock must not already be held by the current
@@ -201,15 +223,19 @@ lock_init (struct lock *lock)
 void
 lock_acquire (struct lock *lock)
 {
+  //debug_backtrace();
+  //printf("<lock acquire>\n");
+  //debug_backtrace_all();
   ASSERT (lock != NULL);
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
-
+  //ASSERT(thread_current() != NULL);
 
   if(!thread_mlfqs){
     ASSERT (thread_current ()->waiting_on == NULL);
     thread_current ()->waiting_on = lock;
-    //lock_promote(lock, thread_current ()->priority);
+    //printf("call lock_promote");
+    lock_promote(lock, thread_current ()->priority); //PROMOTE ONLY IF THERE IS ACTUALLY SOMEONE HOLDING
 
     sema_down (&lock->semaphore);
     //lock acquired
@@ -224,7 +250,7 @@ lock_acquire (struct lock *lock)
     sema_down (&lock->semaphore);
     lock->holder = thread_current ();
   }
-
+  //printf("</lock acquire>\n");
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -236,12 +262,12 @@ lock_acquire (struct lock *lock)
 bool
 lock_try_acquire (struct lock *lock)
 {
+  //printf("<lock_try_acquire>\n");
   bool success;
 
   ASSERT (lock != NULL);
   ASSERT (!lock_held_by_current_thread (lock));
   ASSERT (thread_current ()->waiting_on == NULL);
-  printf("<lock try acquire>\n");
 
   success = sema_try_down (&lock->semaphore);
   if (success){
@@ -252,6 +278,7 @@ lock_try_acquire (struct lock *lock)
       list_push_front(&thread_current ()->locks_held, &lock->elem);
     }
   }
+  //printf("</lock_try_acquire>\n");
   return success;
 }
 
@@ -263,13 +290,14 @@ lock_try_acquire (struct lock *lock)
 void
 lock_release (struct lock *lock) 
 {
+  //printf("<lock_release>\n");
   ASSERT (lock != NULL);
   ASSERT (lock_held_by_current_thread (lock));
   ASSERT (thread_current ()->waiting_on == NULL);
 
   lock->holder = NULL;
 
-  if(!thread_mlfqs){
+  if(!thread_mlfqs){ //tweak priorities
 
     lock->priority = -1;
     list_remove(&lock->elem);
@@ -284,6 +312,7 @@ lock_release (struct lock *lock)
 
   
   sema_up (&lock->semaphore);
+  //printf("</lock_release>\n");
 }
 
 /* Returns true if the current thread holds LOCK, false
@@ -311,7 +340,6 @@ bool lock_priority_cmp(const struct list_elem *a, const struct list_elem *b, voi
 int lock_max(struct list* lock_list)
 {
   ASSERT(!thread_mlfqs); //lock priority doesn't make sense otherwise
-  //ASSERT(is_normal_thread ());
 
   struct list_elem* lock_elem = list_min(lock_list, lock_priority_cmp, NULL);
   if(lock_elem != list_tail(lock_list))
@@ -325,20 +353,19 @@ int lock_max(struct list* lock_list)
   TODO, could impose a limit on recusion depth if needed*/
 void lock_promote(struct lock *lock, int new_priority)
 {
-  /*ASSERT(!thread_mlfqs);
+  ASSERT(!thread_mlfqs);
   ASSERT(lock != NULL);
-  ASSERT(is_normal_thread ());
 
   sema_down(&lock->protection);
-
+  
   if(new_priority > lock->priority){
-    printf("lock promoted from %d to %d\n",lock->priority, new_priority);
+    //printf("lock promoted from %d to %d\n",lock->priority, new_priority);
     lock->priority = new_priority;
 
-    if(new_priority > lock->holder->priority){
-      printf("holder %s promoted from %d to %d\n", lock->holder->name, 
+    if(lock->holder != NULL && new_priority > lock->holder->priority){
+      /*printf("holder %s promoted from %d to %d\n", lock->holder->name, 
                                                    lock->holder->priority, 
-                                                   new_priority);
+                                                   new_priority);*/
       lock->holder->priority = new_priority;
 
       if(lock->holder->waiting_on != NULL){
@@ -349,7 +376,7 @@ void lock_promote(struct lock *lock, int new_priority)
     }
   }
 
-  sema_up(&lock->protection);*/
+  sema_up(&lock->protection);
 
 }
 
