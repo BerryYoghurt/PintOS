@@ -42,8 +42,6 @@ static struct thread *initial_thread;
 /* Lock used by allocate_tid(). */
 static struct lock tid_lock;
 
-/* Lock to protect sleeping threads list*/
-static struct lock sleeping_lock;
 
 /* Stack frame for kernel_thread(). */
 struct kernel_thread_frame 
@@ -111,7 +109,6 @@ thread_init (void)
   ASSERT (intr_get_level () == INTR_OFF);
 
   lock_init (&tid_lock);
-  lock_init (&sleeping_lock);
   list_init (&ready_list);
   list_init (&all_list);
   list_init (&sleeping_threads);
@@ -341,9 +338,12 @@ thread_sleep(int64_t sleep_start, int64_t sleep_duration){
 
   ASSERT(thread_current());
   ASSERT(!intr_context());
-  lock_acquire(&sleeping_lock);
+  ///lock_acquire(&sleeping_lock); disabling interrupts is more suitable because
+  //this list can be modified from the timer interrupt
+  enum intr_level old_level = intr_disable();
   list_insert_ordered(&sleeping_threads, &(sleeping_thread->elem), sleep_cmp, NULL);
-  lock_release(&sleeping_lock);
+  intr_set_level(old_level);
+  //lock_release(&sleeping_lock);
 
   sema_down(&(sleeping_thread->sem));
   //thread woke up
@@ -613,11 +613,11 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+
   if(!thread_mlfqs){
     t->original_priority = priority;
     list_init(&t->locks_held);
     t->waiting_on = NULL;
-    //printf("waiting on %p\n",t->waiting_on);
   }
 
   t->magic = THREAD_MAGIC;
