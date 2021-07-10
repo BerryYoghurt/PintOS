@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include <fxdpoint.h>
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -93,7 +94,11 @@ struct thread
     /* priority donation */
     int original_priority;              /* Priority without any donations. */
     struct list locks_held;             /* locks held by this thread */
-    struct lock* waiting_on;            /* lock this thread is waiting on (NULL if none)*/
+    struct lock *waiting_on;            /* lock this thread is waiting on (NULL if none)*/
+
+    /* mlfqs */
+    fxdpoint_t recent_cpu;              /* Estimate of time this threaad has used cpu recently*/
+    int nice;                           /* Niceness. */
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
