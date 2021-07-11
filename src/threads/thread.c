@@ -69,6 +69,7 @@ static long long user_ticks;    /* # of timer ticks in user programs. */
 #define TIME_SLICE 4            /* # of timer ticks to give each thread. */
 static unsigned thread_ticks;   /* # of timer ticks since last yield. */
 static fxdpoint_t load_avg;     /* Estimate of threads ready to run. */
+static int ready_threads;       /* Number of threads ready or running (not idle). */
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
@@ -92,6 +93,7 @@ void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
 static list_less_func sleep_cmp;
 static thread_action_func mlfqs_calculate_priority;
+static thread_action_func mlfqs_calculate_recent_cpu;
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -126,6 +128,8 @@ thread_init (void)
     mlfqs_calculate_priority(initial_thread,NULL);
   }
   initial_thread->status = THREAD_RUNNING;
+  load_avg = 0;
+  ready_threads = 0; /*initial value*/
   initial_thread->tid = allocate_tid ();
   //printf("</thread_init>\n");
 }
@@ -156,14 +160,44 @@ thread_tick (void)
 {
   //printf("<thread_tick>\n");
   struct thread *t = thread_current ();
-
-  /*wake up all threads that should wake up now or should have waken up before*/
   int64_t now = timer_ticks();
+
+  if(thread_mlfqs)
+  {
+    /*one whole second has passed*/
+    if(now % TIMER_FREQ == 0)
+    { 
+      //fxdpoint_t temp = divide(to_fxdpoint(59), to_fxdpoint(60));
+      load_avg = add( multiply( divide(to_fxdpoint(59), to_fxdpoint(60)),
+                                load_avg),
+                      multiply( divide(to_fxdpoint(1), to_fxdpoint(60)),
+                                to_fxdpoint(ready_threads)));
+      /*printf("-->load avg = %d in fxdpoint\n",
+             load_avg);
+      printf("-->%d.%02d in decimal\n\n", to_int_round(load_avg*100)/100, 
+                                        to_int_round(load_avg*100)%100);*/
+      /* PRINTS CORRECT RESULTS
+      printf("-->59/60 = %d in fxdpoint %d.%02d in decimal\n\n",
+             temp,
+             to_int_round(temp*100)/100, to_int_round(temp*100)%100);*/
+
+      thread_foreach(mlfqs_calculate_recent_cpu, NULL);
+    }
+
+    /*once every fourth tick..
+    cannot rely on thread_ticks because what if thread exits or is preempted or anything*/
+    if(now % 4 == 0){ 
+      thread_foreach(mlfqs_calculate_priority, NULL);
+    }
+  }
+
+  /*  SLEEPING
+  Wake up all threads that should wake up now or should have waken up before*/
   //no need for semaphore because this function runs in an interrupt context anyway
   struct list_elem *element = list_begin(&sleeping_threads);
   struct sleeping_thread *sleeping_thread;
-  while(element != list_end(&sleeping_threads)){
-
+  while(element != list_end(&sleeping_threads))
+  {
     sleeping_thread = list_entry(element, struct sleeping_thread, elem);
 
     if(sleeping_thread->wake_up_time <= now){
@@ -180,11 +214,15 @@ thread_tick (void)
   if (t == idle_thread)
     idle_ticks++;
 #ifdef USERPROG
+  /*don't forget to update recent_cpu here too, future me. Phase 1*/
   else if (t->pagedir != NULL)
     user_ticks++;
 #endif
-  else
+  else{
+    if(thread_mlfqs)
+      t->recent_cpu++;
     kernel_ticks++;
+  }
 
   /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
@@ -238,7 +276,6 @@ thread_create (const char *name, int priority,
   if(!thread_mlfqs){ //not safe to call thread_current in init_thread
     init_thread (t, name, priority, 0, 0);
   }else{
-    //since all (nice, recent_cpu) are inherited from parent, no need to recalculate
     init_thread (t,
                  name, 
                  0, 
@@ -286,6 +323,9 @@ thread_block (void)
   ASSERT (!intr_context ());
   ASSERT (intr_get_level () == INTR_OFF);
 
+  if(thread_current () != idle_thread){
+    ready_threads--; /*running -> blocked*/
+  }
   thread_current ()->status = THREAD_BLOCKED;
   schedule ();
   //printf("</thread_block>\n");
@@ -311,6 +351,9 @@ thread_unblock (struct thread *t)
   ASSERT (t->status == THREAD_BLOCKED);
   list_push_back (&ready_list, &t->elem);
   t->status = THREAD_READY;
+  if(t != idle_thread){
+    ready_threads++; /*new/blocked -> ready*/
+  }
   intr_set_level (old_level);
   //printf("</thread_unblock>\n");
 }
@@ -340,9 +383,9 @@ void
 thread_sleep(int64_t sleep_start, int64_t sleep_duration){
   //printf("<thread_sleep>\n");
   //debug_backtrace_all();
-  struct sleeping_thread* sleeping_thread = (struct sleeping_thread*) malloc(sizeof (struct sleeping_thread));
+  struct sleeping_thread* sleeping_thread = (struct sleeping_thread*) 
+                                            malloc(sizeof (struct sleeping_thread));
 
-  //printf("idle thread id = %d initial thread id = %d \n", idle_thread)
   ASSERT(sleeping_thread != NULL) //what checks should I put here?
   /*thread_sleep is only ever called from timer_sleep, and interrupts should be enabled*/
   ASSERT(intr_get_level() == INTR_ON);
@@ -417,9 +460,13 @@ thread_exit (void)
   /* Remove thread from all threads list, set our status to dying,
      and schedule another process.  That process will destroy us
      when it calls thread_schedule_tail(). */
+  struct thread *t = thread_current();
   intr_disable ();
-  list_remove (&thread_current()->allelem);
-  thread_current ()->status = THREAD_DYING;
+  list_remove (&t->allelem);
+  t->status = THREAD_DYING;
+  if(t != idle_thread && t != initial_thread){
+    ready_threads--; /*running -> dying*/
+  }
   schedule ();
   NOT_REACHED ();
 }
@@ -436,6 +483,7 @@ thread_yield (void)
   ASSERT (!intr_context ());
 
   old_level = intr_disable ();
+  /*Here, thread switches from running to ready, no need to update ready_threads*/
   if (cur != idle_thread) 
     list_push_back (&ready_list, &cur->elem);
   cur->status = THREAD_READY;
@@ -534,16 +582,25 @@ thread_get_nice (void)
 /* Calculates priority for mlfq*/
 void
 mlfqs_calculate_priority(struct thread *t, void *aux UNUSED){
-  ASSERT(thread_mlfqs);
+  //ASSERT(thread_mlfqs);
   int ans = to_int_trunc(to_fxdpoint(PRI_MAX) 
                           - (t->recent_cpu / 4) 
-                          + to_fxdpoint(t->nice * 2));
+                          - to_fxdpoint(t->nice * 2));
   if(ans < PRI_MIN)
     t->priority = PRI_MIN;
   else if(ans > PRI_MAX)
     t->priority = PRI_MAX;
   else
     t->priority = ans;
+}
+
+void
+mlfqs_calculate_recent_cpu(struct thread *t, void *aux UNUSED){
+  //ASSERT(thread_mlfqs);
+  t->recent_cpu = add( multiply( divide( 2*load_avg,
+                                        add(2*load_avg, to_fxdpoint(1))),
+                                 to_fxdpoint(t->recent_cpu)),
+                       to_fxdpoint(t->nice));
 }
 
 /* Returns 100 times the system load average. */

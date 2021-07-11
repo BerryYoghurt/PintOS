@@ -7,7 +7,7 @@ fxdpoint_t
 to_fxdpoint(int n)
 {
     int64_t ans = n*f;
-    CHECK_OVERFLOW(ans);
+    //CHECK_OVERFLOW(ans);
     return ans;
 }
 
@@ -21,7 +21,7 @@ to_int_round(fxdpoint_t x)
     }else{
         ans = (((int64_t)x) - f/2)/f;
     }
-    CHECK_OVERFLOW(ans);
+    //CHECK_OVERFLOW(ans);
     return ans;
 }
 
@@ -37,7 +37,7 @@ fxdpoint_t
 add(fxdpoint_t x, fxdpoint_t y)
 {
     int64_t ans = ((int64_t)x)+y;
-    CHECK_OVERFLOW(ans);
+    //CHECK_OVERFLOW(ans);
     return ans;
 }
 
@@ -46,7 +46,7 @@ fxdpoint_t
 subtract(fxdpoint_t x, fxdpoint_t y)
 {
     int64_t ans = ((int64_t)x)-y;
-    CHECK_OVERFLOW(ans);
+    //CHECK_OVERFLOW(ans);
     return ans;
 }
 
@@ -55,7 +55,7 @@ fxdpoint_t
 multiply(fxdpoint_t x, fxdpoint_t y)
 {
     int64_t ans = ((int64_t)x)*y/f;
-    CHECK_OVERFLOW(ans);
+    //CHECK_OVERFLOW(ans);
     return ans;
 }
 
@@ -64,6 +64,6 @@ fxdpoint_t
 divide(fxdpoint_t x, fxdpoint_t y)
 {
     int64_t ans = ((int64_t)x)*f/y;
-    CHECK_OVERFLOW(ans);
+    //CHECK_OVERFLOW(ans);
     return ans;
 }
