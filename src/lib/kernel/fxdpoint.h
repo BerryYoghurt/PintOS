@@ -18,6 +18,7 @@ reduce resolution. Might use if needed */
 #include <limits.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include "../debug.h"
 
 #define FRAC_BITS 14 /* Must be less than 32 */
@@ -36,6 +37,8 @@ fxdpoint_t subtract(fxdpoint_t,fxdpoint_t);
 
 fxdpoint_t multiply(fxdpoint_t, fxdpoint_t);
 fxdpoint_t divide(fxdpoint_t,fxdpoint_t);
+
+//void to_string(char*, fxdpoint_t);
 
 
 #endif

@@ -7,7 +7,7 @@ fxdpoint_t
 to_fxdpoint(int n)
 {
     int64_t ans = n*f;
-    //CHECK_OVERFLOW(ans);
+    CHECK_OVERFLOW(ans);
     return ans;
 }
 
@@ -21,7 +21,7 @@ to_int_round(fxdpoint_t x)
     }else{
         ans = (((int64_t)x) - f/2)/f;
     }
-    //CHECK_OVERFLOW(ans);
+    CHECK_OVERFLOW(ans);
     return ans;
 }
 
@@ -37,7 +37,7 @@ fxdpoint_t
 add(fxdpoint_t x, fxdpoint_t y)
 {
     int64_t ans = ((int64_t)x)+y;
-    //CHECK_OVERFLOW(ans);
+    CHECK_OVERFLOW(ans);
     return ans;
 }
 
@@ -46,7 +46,7 @@ fxdpoint_t
 subtract(fxdpoint_t x, fxdpoint_t y)
 {
     int64_t ans = ((int64_t)x)-y;
-    //CHECK_OVERFLOW(ans);
+    CHECK_OVERFLOW(ans);
     return ans;
 }
 
@@ -54,8 +54,8 @@ subtract(fxdpoint_t x, fxdpoint_t y)
 fxdpoint_t
 multiply(fxdpoint_t x, fxdpoint_t y)
 {
-    int64_t ans = ((int64_t)x)*y/f;
-    //CHECK_OVERFLOW(ans);
+    int64_t ans = (((int64_t)x)*y)/f;
+    CHECK_OVERFLOW(ans);
     return ans;
 }
 
@@ -63,7 +63,15 @@ multiply(fxdpoint_t x, fxdpoint_t y)
 fxdpoint_t
 divide(fxdpoint_t x, fxdpoint_t y)
 {
-    int64_t ans = ((int64_t)x)*f/y;
-    //CHECK_OVERFLOW(ans);
+    int64_t ans = (((int64_t)x)*f)/y;
+    CHECK_OVERFLOW(ans);
     return ans;
 }
+
+
+/* formats positive numbers with 2 dp*/
+/*void
+to_string(char *buf, fxdpoint_t x){
+    int temp = to_int_round(x*100);
+    snprintf(buf, "%d.%02d", temp/100, temp%100);
+}*/

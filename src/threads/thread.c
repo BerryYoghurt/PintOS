@@ -85,7 +85,7 @@ static void init_thread (struct thread *,
                          const char *name, 
                          int priority, 
                          int nice, 
-                         int recent_cpu);
+                         fxdpoint_t recent_cpu);
 static bool is_thread (struct thread *) UNUSED;
 static void *alloc_frame (struct thread *, size_t size);
 static void schedule (void);
@@ -170,8 +170,7 @@ thread_tick (void)
       //fxdpoint_t temp = divide(to_fxdpoint(59), to_fxdpoint(60));
       load_avg = add( multiply( divide(to_fxdpoint(59), to_fxdpoint(60)),
                                 load_avg),
-                      multiply( divide(to_fxdpoint(1), to_fxdpoint(60)),
-                                to_fxdpoint(ready_threads)));
+                      divide(to_fxdpoint(ready_threads), to_fxdpoint(60)));
       /*printf("-->load avg = %d in fxdpoint\n",
              load_avg);
       printf("-->%d.%02d in decimal\n\n", to_int_round(load_avg*100)/100, 
@@ -182,6 +181,8 @@ thread_tick (void)
              to_int_round(temp*100)/100, to_int_round(temp*100)%100);*/
 
       thread_foreach(mlfqs_calculate_recent_cpu, NULL);
+    }else if(t != idle_thread){
+      t->recent_cpu = add(t->recent_cpu, to_fxdpoint(1));
     }
 
     /*once every fourth tick..
@@ -219,8 +220,6 @@ thread_tick (void)
     user_ticks++;
 #endif
   else{
-    if(thread_mlfqs)
-      t->recent_cpu++;
     kernel_ticks++;
   }
 
@@ -583,9 +582,9 @@ thread_get_nice (void)
 void
 mlfqs_calculate_priority(struct thread *t, void *aux UNUSED){
   //ASSERT(thread_mlfqs);
-  int ans = to_int_trunc(to_fxdpoint(PRI_MAX) 
-                          - (t->recent_cpu / 4) 
-                          - to_fxdpoint(t->nice * 2));
+  /*both pri_max and nice are ints, so max 63+20 = 83.. sure no overflow*/
+  int ans = to_int_trunc(subtract( to_fxdpoint(PRI_MAX - t->nice * 2), 
+                                   (t->recent_cpu / 4)));
   if(ans < PRI_MIN)
     t->priority = PRI_MIN;
   else if(ans > PRI_MAX)
@@ -596,10 +595,13 @@ mlfqs_calculate_priority(struct thread *t, void *aux UNUSED){
 
 void
 mlfqs_calculate_recent_cpu(struct thread *t, void *aux UNUSED){
-  //ASSERT(thread_mlfqs);
+  /*ASSERT(thread_mlfqs);
+  ASSERT(load_avg >= 0);
+  ASSERT(t->recent_cpu >= 0);
+  ASSERT(t->nice >= 0);*/
   t->recent_cpu = add( multiply( divide( 2*load_avg,
                                         add(2*load_avg, to_fxdpoint(1))),
-                                 to_fxdpoint(t->recent_cpu)),
+                                 t->recent_cpu),
                        to_fxdpoint(t->nice));
 }
 
@@ -697,7 +699,7 @@ init_thread (struct thread *t,
              const char *name,
              int priority,
              int nice, 
-             int recent_cpu)
+             fxdpoint_t recent_cpu)
 {
   //printf("<init_thread>\n");
   enum intr_level old_level;
