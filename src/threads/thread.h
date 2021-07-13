@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include <fxdpoint.h>
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -87,8 +88,17 @@ struct thread
     enum thread_status status;          /* Thread state. */
     char name[16];                      /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
-    int priority;                       /* Priority. */
+    int priority;                       /* _Effective_ Priority. */
     struct list_elem allelem;           /* List element for all threads list. */
+
+    /* priority donation */
+    int original_priority;              /* Priority without any donations. */
+    struct list locks_held;             /* locks held by this thread */
+    struct lock *waiting_on;            /* lock this thread is waiting on (NULL if none)*/
+
+    /* mlfqs */
+    fxdpoint_t recent_cpu;              /* Estimate of time this threaad has used cpu recently*/
+    int nice;                           /* Niceness. */
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
@@ -118,6 +128,7 @@ tid_t thread_create (const char *name, int priority, thread_func *, void *);
 
 void thread_block (void);
 void thread_unblock (struct thread *);
+void thread_sleep(int64_t sleep_start, int64_t sleep_duration);
 
 struct thread *thread_current (void);
 tid_t thread_tid (void);
@@ -132,6 +143,7 @@ void thread_foreach (thread_action_func *, void *);
 
 int thread_get_priority (void);
 void thread_set_priority (int);
+list_less_func thread_priority_cmp;
 
 int thread_get_nice (void);
 void thread_set_nice (int);

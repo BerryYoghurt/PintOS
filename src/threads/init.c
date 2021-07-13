@@ -128,7 +128,8 @@ main (void)
 #endif
 
   printf ("Boot complete.\n");
-  
+  //printf ("normal execution context\n");
+
   /* Run actions specified on kernel command line. */
   run_actions (argv);
 
@@ -197,6 +198,7 @@ read_command_line (void)
   char *p, *end;
   int argc;
   int i;
+  
 
   argc = *(uint32_t *) ptov (LOADER_ARG_CNT);
   p = ptov (LOADER_ARGS);
