@@ -6,3 +6,4 @@ bochsrc.txt
 LICENSE
 Makefile
 /src/utils/*
+!/src/utils/Makefile

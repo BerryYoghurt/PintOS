@@ -1,5 +1,5 @@
 #ifndef __LIB_KERNEL_FXDPOINT_H
-#define __LIB_KERNEL_FSDPOINT_H
+#define __LIB_KERNEL_FXDPOINT_H
 
 /* Types and functions for fixed point arithmetic.
 For now, implements 17.14 format, but could change if needed
