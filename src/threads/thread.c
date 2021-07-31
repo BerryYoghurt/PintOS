@@ -202,8 +202,8 @@ thread_create (const char *name, int priority,
     Both: the parent will see the semaphore right when this function returns
           the child will see the semaphore right when it starts 
     If child creation fails before that, it will have no entry in the hash table*/
-  if(!process_register_child(t,tid)){
-    printf("Malloc failed in register child\n");
+  if(!process_register_child(t,tid))
+  {
     palloc_free_page(t);
     return TID_ERROR;
   }
@@ -472,6 +472,7 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  list_init(&t->opened_files);
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();

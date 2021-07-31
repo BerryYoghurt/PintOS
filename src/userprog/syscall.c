@@ -7,15 +7,26 @@
 #include "userprog/pagedir.h"
 #include "devices/shutdown.h"
 #include "lib/kernel/stdio.h"
+#include "filesys/filesys.h"
+#include "filesys/file.h"
+#include "devices/input.h"
 
 static void syscall_handler (struct intr_frame *);
 static void validate_filename (char *);
 static void validate_four_bytes (void*);
+static void validate_buffer (const void*, unsigned);
+static struct file *find_file (int);
+static list_predicate_func file_with_descriptor;
+
+static struct lock filesys_lock; /*A lock to be used everywhere the filesystem is 
+                                   accessed because I have no idea how it works or what
+                                   needs synchronisation and what doesn't*/
 
 void
 syscall_init (void) 
 {
   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
+  lock_init(&filesys_lock);
 }
 
 static void
@@ -111,7 +122,7 @@ void syscall_exit (int status)
 pid_t syscall_exec (char *file)
 {
   validate_filename(file); 
-
+  //TODO, add the executable to the files opened by the thread to deny writes
   tid_t t = process_execute(file);
   if(t == TID_ERROR)
     return -1;
@@ -123,41 +134,142 @@ int syscall_wait (pid_t child_id)
   return process_wait(child_id);
 }
 
-bool syscall_create (char *file, unsigned initial_size){
+bool 
+syscall_create (char *file, unsigned initial_size)
+{
   validate_filename (file);
-  //TODO
-  return false;
+  lock_acquire (&filesys_lock);
+  bool ret = filesys_create (file, initial_size);
+  lock_release (&filesys_lock);
+  return ret;
 }
 
-bool syscall_remove (char *file){
+bool 
+syscall_remove (char *file)
+{
   validate_filename (file);
-  //TODO
-  return false;
+  lock_acquire (&filesys_lock);
+  bool ret = filesys_remove (file);
+  lock_release (&filesys_lock);
+  return ret;
 }
 
-int syscall_open (char *file){
+int 
+syscall_open (char *file)
+{
   validate_filename (file);
-  //TODO
-  return 0;
+  struct thread * t = thread_current ();
+  lock_acquire (&filesys_lock);
+  struct file * f = filesys_open (file);
+  lock_release (&filesys_lock);
+
+  if(f == NULL)
+    return -1;
+
+  f->descriptor = list_size (&t->opened_files) + 2; //for now
+  list_push_back (&t->opened_files, &f->elem);
+  return f->descriptor;
 }
 
-int syscall_filesize (int fd){
-  return 0;
+int 
+syscall_filesize (int fd)
+{
+  struct file *f = find_file (fd);
+  if(f == NULL)
+    thread_exit ();
+  lock_acquire (&filesys_lock);
+  int ret = file_length (f);
+  lock_release (&filesys_lock);
+  return ret;
 }
 
-int syscall_read (int fd, void *buffer, unsigned length){
-  return 0;
+static struct file *
+find_file (const int fd)
+{
+  struct thread * t = thread_current ();
+  struct list_elem *e = list_find (&t->opened_files,
+                                    file_with_descriptor,
+                                    (void*)fd);
+  if(e == NULL)
+    return NULL;
+  return list_entry (e, struct file, elem);
 }
 
-int syscall_write (int fd, const void *buffer, unsigned length)
+/* Predicate to pick struct file with descriptor equal to AUX */
+static bool
+file_with_descriptor (const struct list_elem * e, void *aux)
+{
+  struct file *f = list_entry (e, struct file, elem);
+  return f->descriptor == (int) aux;
+}
+
+int 
+syscall_read (int fd, void *buffer, unsigned length)
+{
+  if(fd == 1)
+  {
+    thread_exit ();
+  }
+  else
+  {
+    validate_buffer (buffer, length);
+
+    if(fd == 0)
+    {
+      char * buf = buffer;
+      for (int i = 0; i < length; i++)
+      {
+        //should I put a lock here? can 2 processes get input at the same time??
+        buf[i] = input_getc ();
+      }
+      return length;
+    }
+    else
+    {
+      struct file *f = find_file (fd);
+      if(f == NULL)
+        thread_exit ();
+      lock_acquire (&filesys_lock);
+        int ret = file_read (f, buffer, length);
+      lock_release (&filesys_lock);
+      return ret;
+    }
+  }
+}
+
+int 
+syscall_write (int fd, const void *buffer, unsigned length)
 {
   if(fd == 0)
   {
-    printf("Writing to stdin!\n");
-    return -1;
+    thread_exit ();
   }
   else
   { 
+    validate_buffer (buffer, length);
+
+    if(fd == 1)
+    {
+      /*not restricting the size of buffer for the time being*/
+      putbuf((char*)buffer, length);
+      return (int)length;
+    }
+    else
+    {
+      struct file *f = find_file (fd);
+      if(f == NULL)
+        thread_exit ();
+      lock_acquire (&filesys_lock);
+        int ret = file_write (f, buffer, length);
+      lock_release (&filesys_lock);
+      return ret;
+    }
+  }
+}
+
+static void
+validate_buffer (const void *buffer, unsigned int length)
+{
     if(buffer == NULL)
       thread_exit();
       
@@ -172,27 +284,48 @@ int syscall_write (int fd, const void *buffer, unsigned length)
       }
       temp = (char*)pg_round_up((void*)temp);
     }
-
-    if(fd == 1)
-    {
-      /*not restricting the size of buffer for the time being*/
-      putbuf((char*)buffer, length);
-      return (int)length;
-    }
-    else
-    {
-      return 0;
-    }
-  }
 }
+
 void syscall_seek (int fd, unsigned position){
+  if(fd == 0 || fd == 1)
+    {
+      thread_exit ();
+    }
 
+  struct file *f = find_file (fd);
+  if(f == NULL)
+    return;
+  f->pos = position;
 }
-unsigned syscall_tell (int fd){
-  return 0;
-}
-void syscall_close (int fd){
 
+unsigned 
+syscall_tell (int fd)
+{
+  if(fd == 0 || fd == 1)
+    {
+      thread_exit ();
+    }
+
+  struct file *f = find_file (fd);
+  if(f == NULL)
+    return -1;
+  return f->pos;
+}
+
+void 
+syscall_close (int fd)
+{
+  if(fd == 0 || fd == 1)
+    {
+      thread_exit ();
+    }
+
+  struct file *f = find_file (fd);
+  if(f == NULL)
+    thread_exit ();
+  lock_acquire (&filesys_lock);
+    file_close (f);
+  lock_release (&filesys_lock);
 }
 
 void
@@ -200,12 +333,12 @@ validate_filename (char * file)
 {
   if(file == NULL)
     thread_exit();
-  char* temp = file;
+  char* temp = file - 1;
   uint32_t *pd = thread_current ()->pagedir;
   do{
+    temp++;
     if((void*)temp >= PHYS_BASE || pagedir_get_page(pd, (void*)temp) == NULL){
       thread_exit();
     }
-    temp++;
   }while(*temp != '\0');
 }

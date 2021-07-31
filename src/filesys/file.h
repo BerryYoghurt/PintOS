@@ -2,8 +2,20 @@
 #define FILESYS_FILE_H
 
 #include "filesys/off_t.h"
+#include "lib/kernel/list.h"
 
 struct inode;
+
+/* An open file. WHY did they define it in file.c?????????*/
+struct file 
+  {
+    struct inode *inode;        /* File's inode. */
+    off_t pos;                  /* Current position. */
+    bool deny_write;            /* Has file_deny_write() been called? */
+    int descriptor;
+    struct list_elem elem;
+  };
+
 
 /* Opening and closing files. */
 struct file *file_open (struct inode *);

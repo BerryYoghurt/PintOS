@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "filesys/file.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -96,9 +97,12 @@ struct thread
 //#ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
-    struct child *as_child;
-    //TODO delete the hash code
-    struct parent *as_parent;
+    struct child *as_child;             /* Use this when treating the thread 
+                                             as a child of another process*/
+    struct parent *as_parent;           /* Use this when treating it as a parent */
+    struct file *executable;
+    struct list opened_files;    
+
 //#endif
 
     /* Owned by thread.c. */

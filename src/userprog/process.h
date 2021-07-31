@@ -4,6 +4,14 @@
 #include "threads/thread.h"
 #include "threads/synch.h"
 
+enum child_state 
+{
+  IN_CREATION,    /* Duration from thread_create to end of start_process*/
+  RUNNING,        /* From the end of start_process to process_exit */
+  TERMINATED,     /* From process_exit till process_wait (which deallocates the struct) */
+  ZOMBIFIED       /* If parent exits without waiting */
+};
+
 /*The structs parent and child have to exist independently of both
 the parent and the child so that we will need less special cases
 if one terminates before the other. It is easier this way.
@@ -24,6 +32,8 @@ struct child
     int status;            /*Termination status*/
     struct semaphore sema; /*semaphore to mark lifetime events of child. Is upped once
       when child creation is complete, and once when child terminates*/
+    enum child_state state; 
+    struct semaphore protection; /*concurrent changes to child in parent and child*/
     struct list_elem elem;
   };
 
@@ -32,6 +42,6 @@ int process_wait (tid_t);
 void process_exit (void);
 void process_activate (void);
 void process_init (void);
-int process_register_child (struct thread *, tid_t);
+bool process_register_child (struct thread *, tid_t);
 
 #endif /* userprog/process.h */

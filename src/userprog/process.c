@@ -76,9 +76,10 @@ process_execute (const char *file_name)
                             elem);
   sema_down(&chld->sema);
 
-  if (chld->status == -2) //loading failed
+  if (chld->state == IN_CREATION) //loading failed
   {
-    list_remove(&chld->elem);
+    sema_down (&chld->sema); //wait till child exits
+    list_remove (&chld->elem);
     free(chld);
     return TID_ERROR;
   }
@@ -116,11 +117,10 @@ start_process (void *file_name_)
 
   /*creation done*/
   if (!success){
-    t->as_child->status = -2;
     sema_up(&t->as_child->sema);
     thread_exit ();
   }else{
-    t->as_child->status = -1;
+    t->as_child->state = RUNNING;
     sema_up(&t->as_child->sema);
   }
 
@@ -184,10 +184,69 @@ process_exit (void)
       cur->pagedir = NULL;
       pagedir_activate (NULL);
       pagedir_destroy (pd);
+      
+      /*Question: why do we need to deny write for the whole running duration
+        not just for the loading duration? virtual memory?*/
+      file_close (cur->executable); //file cannot be nonnull if pagedir is null (see load)
+      
       //printf must be here so that even if kernel kills the process, it will print
       printf("%s: exit(%d)\n",cur->name,cur->as_child->status);
-      sema_up(&cur->as_child->sema);
     }
+
+  /* clean up struct parent */
+  struct list * l = &cur->as_parent->children;
+  while(!list_empty (l))
+  {
+    //add another semaphore to protect child.. not to mark lifetime
+    struct list_elem *e = list_pop_front (l);
+    list_remove (e);
+    struct child *c = list_entry (e, struct child, elem);
+    sema_down (&c->protection);
+    switch (c->state)
+    {
+    case IN_CREATION: //failed creation
+      NOT_REACHED ()
+      break;
+    case RUNNING:     //Thanks I don't need you anymore
+      c->state = ZOMBIFIED;
+      sema_up (&c->protection);
+      break;
+    case TERMINATED:  //I didn't pick up its return value
+      free (c);
+      break;
+    case ZOMBIFIED:
+      NOT_REACHED ()
+      break;
+    default:
+      NOT_REACHED ()
+    }
+  }
+
+  list_remove (&cur->as_parent->elem);
+  free(cur->as_parent);
+
+  /* clean up struct child */
+  sema_down (&cur->as_child->protection);
+  switch (cur->as_child->state)
+  {
+  case IN_CREATION:
+    //parent should free me
+    sema_up (&cur->as_child->protection); //modification of child OK
+    sema_up (&cur->as_child->sema);   //lifecycle [termination]
+    break;
+  case RUNNING:
+    cur->as_child->state = TERMINATED;
+    sema_up (&cur->as_child->protection);
+    sema_up (&cur->as_child->sema);
+    break;
+  case TERMINATED:
+    NOT_REACHED ()
+  case ZOMBIFIED:
+    free (&cur->as_child);
+    break;
+  default:
+    NOT_REACHED ()
+  }
 }
 
 /* Sets up the CPU for running user code in the current
@@ -229,15 +288,18 @@ process_init (void)
   And adds it as a new potential parent
   Returns a nonzero value if the child was registered correctly
   */
-int
-process_register_child(struct thread *child_thread, tid_t child_id){
+bool
+process_register_child(struct thread *child_thread, tid_t child_id)
+{
   struct child *c = (struct child*)malloc(sizeof (struct child));
   if(c == NULL)
-    return 0;
+    return false;
 
   c->child_id = child_id;
-  c->status = -2;
-  sema_init(&c->sema,0);
+  c->status = -1;
+  c->state = IN_CREATION;
+  sema_init(&c->sema, 0);
+  sema_init (&c->protection, 1);
   child_thread->as_child = c;
 
   /*Get my parent from the graph*/
@@ -247,7 +309,7 @@ process_register_child(struct thread *child_thread, tid_t child_id){
   /*Register me as an independent parent*/
   p = (struct parent*)malloc(sizeof (struct parent));
   if(p == NULL)
-    return 0;
+    return false;
   
   list_init(&p->children);
   child_thread->as_parent = p;
@@ -255,7 +317,7 @@ process_register_child(struct thread *child_thread, tid_t child_id){
     list_push_back(&process_graph, &p->elem);
   lock_release(&graph_lock);
 
-  return 1;
+  return true;
 }
 
 
@@ -356,6 +418,9 @@ load (const char *file_name, void (**eip) (void), void **esp)
       goto done; 
     }
 
+  t->executable = file;
+  file_deny_write (file);
+
   /* Read and verify executable header. */
   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
       || memcmp (ehdr.e_ident, "\177ELF\1\1\1", 7)
@@ -439,7 +504,6 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
  done:
   /* We arrive here whether the load is successful or not. */
-  file_close (file);
   return success;
 }
 
