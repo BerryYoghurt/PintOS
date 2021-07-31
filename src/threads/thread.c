@@ -198,6 +198,16 @@ thread_create (const char *name, int priority,
   sf->eip = switch_entry;
   sf->ebp = 0;
 
+  /* The entry in the process_graph should be created here so that
+    Both: the parent will see the semaphore right when this function returns
+          the child will see the semaphore right when it starts 
+    If child creation fails before that, it will have no entry in the hash table*/
+  if(!process_register_child(t,tid)){
+    printf("Malloc failed in register child\n");
+    palloc_free_page(t);
+    return TID_ERROR;
+  }
+
   /* Add to run queue. */
   thread_unblock (t);
 

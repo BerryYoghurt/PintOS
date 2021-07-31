@@ -522,3 +522,17 @@ list_min (struct list *list, list_less_func *less, void *aux)
     }
   return min;
 }
+
+/*Returns the list element which satisfies predicate, or NULL if none*/
+struct list_elem *
+list_find (struct list *list, list_predicate_func *pred, void *aux)
+{
+  for(struct list_elem *elem = list_begin(list);
+       elem != list_end(list);
+       elem = list_next(elem))
+  {
+    if(pred(elem, aux))
+      return elem;    
+  }
+  return NULL;
+}

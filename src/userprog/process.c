@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <list.h>
 #include "userprog/gdt.h"
 #include "userprog/pagedir.h"
 #include "userprog/tss.h"
@@ -15,11 +16,18 @@
 #include "threads/init.h"
 #include "threads/interrupt.h"
 #include "threads/palloc.h"
+#include "threads/malloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 
+/*A graph to keep track of parent-child relationships*/
+//static struct hash process_graph;
+static struct list process_graph;
+static struct lock graph_lock;
+
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
+static list_predicate_func child_with_id;
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
@@ -28,7 +36,7 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp);
 tid_t
 process_execute (const char *file_name) 
 {
-  char *fn_copy;
+  char *fn_copy, *exec_name, *save_ptr, *temp_storage;
   tid_t tid;
 
   /* Make a copy of FILE_NAME.
@@ -38,11 +46,52 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+  /*No need to allocate memory for the executable name because
+    16 bytes are already reserved for it in the struct thread.*/
+  exec_name = strtok_r(fn_copy, " ", &save_ptr);
+  temp_storage = (char*)malloc(strlen(exec_name)+1);
+  if(temp_storage == NULL)
+    return TID_ERROR;
+  strlcpy(temp_storage, exec_name, strlen(exec_name)+1);
+  strlcpy(fn_copy, file_name, PGSIZE);
+  
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (temp_storage, PRI_DEFAULT, start_process, fn_copy);
+  free((void*)temp_storage);
+
+  /*This page will be deallocated whether the loading is successful or not.
+    If thread creation is successfull, it will be deallocated in start_process.
+    Else, it will be deallocated here.*/
   if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
+  {
+    palloc_free_page (fn_copy);
+    return TID_ERROR;
+  } 
+
+  /*wait on the semaphore to ensure that the process started successfully*/
+  struct child *chld = list_entry(
+                            list_find(&thread_current ()->as_parent->children,
+                                      child_with_id, (void*)tid),
+                            struct child,
+                            elem);
+  sema_down(&chld->sema);
+
+  if (chld->status == -2) //loading failed
+  {
+    list_remove(&chld->elem);
+    free(chld);
+    return TID_ERROR;
+  }
+
   return tid;
+}
+
+/*Predicate to find a child in a list of children*/
+bool
+child_with_id(const struct list_elem *e, void *aux){
+  int id = (int)(aux);
+  struct child *c = list_entry(e, struct child, elem);
+  return c->child_id == id;
 }
 
 /* A thread function that loads a user process and starts it
@@ -53,6 +102,7 @@ start_process (void *file_name_)
   char *file_name = file_name_;
   struct intr_frame if_;
   bool success;
+  struct thread * t = thread_current();
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
@@ -63,8 +113,16 @@ start_process (void *file_name_)
 
   /* If load failed, quit. */
   palloc_free_page (file_name);
-  if (!success) 
+
+  /*creation done*/
+  if (!success){
+    t->as_child->status = -2;
+    sema_up(&t->as_child->sema);
     thread_exit ();
+  }else{
+    t->as_child->status = -1;
+    sema_up(&t->as_child->sema);
+  }
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -86,9 +144,22 @@ start_process (void *file_name_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (tid_t child_tid) 
 {
-  return -1;
+  struct list_elem *e = list_find(&thread_current ()->as_parent->children,
+                                      child_with_id, (void*)child_tid);
+  if(e == NULL)
+  {
+    /*This could happen if child_tid is not a child of this process,
+    or it has been waited for before.*/
+    return -1;
+  }
+  struct child *c = list_entry(e, struct child, elem);
+  sema_down(&c->sema);
+  int status = c->status;
+  list_remove(&c->elem);
+  free(c);
+  return status;
 }
 
 /* Free the current process's resources. */
@@ -113,6 +184,9 @@ process_exit (void)
       cur->pagedir = NULL;
       pagedir_activate (NULL);
       pagedir_destroy (pd);
+      //printf must be here so that even if kernel kills the process, it will print
+      printf("%s: exit(%d)\n",cur->name,cur->as_child->status);
+      sema_up(&cur->as_child->sema);
     }
 }
 
@@ -131,6 +205,59 @@ process_activate (void)
      interrupts. */
   tss_update ();
 }
+
+/*Initializes the data structures needed for keeping track of
+  which processes are decendents of which*/
+void
+process_init (void)
+{
+  list_init(&process_graph);
+  lock_init(&graph_lock);
+  struct parent *p = (struct parent *)malloc(sizeof (struct parent));
+  if(p != NULL){
+    list_init(&p->children);
+    thread_current ()->as_parent = p;
+    list_push_back(&process_graph, &p->elem);
+  }else{
+    PANIC("initial thread parent struct not allocated\n");
+  }
+}
+
+
+/*Called from the parent on child creation to register
+  the created process as a child of the current process.
+  And adds it as a new potential parent
+  Returns a nonzero value if the child was registered correctly
+  */
+int
+process_register_child(struct thread *child_thread, tid_t child_id){
+  struct child *c = (struct child*)malloc(sizeof (struct child));
+  if(c == NULL)
+    return 0;
+
+  c->child_id = child_id;
+  c->status = -2;
+  sema_init(&c->sema,0);
+  child_thread->as_child = c;
+
+  /*Get my parent from the graph*/
+  struct parent *p = thread_current ()->as_parent;
+  list_push_front(&p->children, &c->elem);
+
+  /*Register me as an independent parent*/
+  p = (struct parent*)malloc(sizeof (struct parent));
+  if(p == NULL)
+    return 0;
+  
+  list_init(&p->children);
+  child_thread->as_parent = p;
+  lock_acquire(&graph_lock);
+    list_push_back(&process_graph, &p->elem);
+  lock_release(&graph_lock);
+
+  return 1;
+}
+
 
 /* We load ELF binaries.  The following definitions are taken
    from the ELF specification, [ELF1], more-or-less verbatim.  */
@@ -195,7 +322,7 @@ struct Elf32_Phdr
 #define PF_W 2          /* Writable. */
 #define PF_R 4          /* Readable. */
 
-static bool setup_stack (void **esp);
+static bool setup_stack (const char * cmdline, void **esp);
 static bool validate_segment (const struct Elf32_Phdr *, struct file *);
 static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           uint32_t read_bytes, uint32_t zero_bytes,
@@ -222,10 +349,10 @@ load (const char *file_name, void (**eip) (void), void **esp)
   process_activate ();
 
   /* Open executable file. */
-  file = filesys_open (file_name);
+  file = filesys_open (t->name); //instead of file_name, which still includes the arguments
   if (file == NULL) 
     {
-      printf ("load: %s: open failed\n", file_name);
+      printf ("load: %s: open failed\n", t->name);
       goto done; 
     }
 
@@ -302,7 +429,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
     }
 
   /* Set up stack. */
-  if (!setup_stack (esp))
+  if (!setup_stack (file_name, esp))
     goto done;
 
   /* Start address. */
@@ -427,7 +554,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 /* Create a minimal stack by mapping a zeroed page at the top of
    user virtual memory. */
 static bool
-setup_stack (void **esp) 
+setup_stack (const char *cmdline, void **esp) 
 {
   uint8_t *kpage;
   bool success = false;
@@ -437,7 +564,60 @@ setup_stack (void **esp)
     {
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
       if (success)
-        *esp = PHYS_BASE;
+      {
+        int argc = 0, size = strlen(cmdline)+1;
+        char *save_ptr, *token;
+        void * top_of_stack = PHYS_BASE;
+
+        /*copy cmdline to the allocated page so that I can split it with strtok_r*/
+        token = (char*)top_of_stack - size;
+        strlcpy(token, cmdline, size);
+        top_of_stack = (void *)token;
+
+        for (token = strtok_r (token, " ", &save_ptr); token != NULL;
+                    token = strtok_r (NULL, " ", &save_ptr))
+          {
+            argc++;
+            /*store the addresses on the stack temporarily*/
+            top_of_stack = (char**)top_of_stack - 1;
+            *(char**)top_of_stack = token;
+          }
+
+        char* adr[argc];
+        for(int i = argc-1; i >= 0; i--)
+          {
+            adr[i] = *(char**)top_of_stack;
+            top_of_stack = (char**)top_of_stack + 1;
+          }
+
+        /*word align*/
+        if((unsigned)top_of_stack % 4 != 0){
+          top_of_stack -= (unsigned)top_of_stack % 4;
+        }
+
+        /*push null word*/
+        top_of_stack = (int*)top_of_stack - 1;
+        *(int*)top_of_stack = 0;
+
+        /*push contents of argv*/
+        for(int i = argc-1; i >= 0; i--){
+          top_of_stack = (char**)top_of_stack - 1;
+          *(char **)top_of_stack = adr[i];
+        }
+        /*push argv*/
+        *((char***)top_of_stack - 1) = top_of_stack;
+        top_of_stack = (char***)top_of_stack - 1;
+        /*push argc*/
+        top_of_stack = (int*)top_of_stack - 1;
+        *(int *)top_of_stack = argc;
+
+        /*push dummy return address*/
+        top_of_stack = (void **)top_of_stack - 1;
+        *(void **)top_of_stack = (void*)0xaaaaaaaa;
+
+        *esp = top_of_stack;
+        //hex_dump((uintptr_t)*esp, *esp, 0x50,true);
+      }
       else
         palloc_free_page (kpage);
     }
