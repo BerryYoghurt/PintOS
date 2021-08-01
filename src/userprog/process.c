@@ -80,6 +80,8 @@ process_execute (const char *file_name)
   {
     sema_down (&chld->sema); //wait till child exits
     list_remove (&chld->elem);
+    ASSERT (list_find(&thread_current ()->as_parent->children,
+                        child_with_id, (void*)tid) == NULL);
     free(chld);
     return TID_ERROR;
   }
@@ -193,13 +195,21 @@ process_exit (void)
       printf("%s: exit(%d)\n",cur->name,cur->as_child->status);
     }
 
+  /* Free opened files */
+  struct list * l = &cur->opened_files;
+  while (!list_empty (l))
+  {
+    struct list_elem *e = list_pop_front (l);
+    struct file *f = list_entry (e, struct file, elem);
+    file_close (f);
+  }
+
   /* clean up struct parent */
-  struct list * l = &cur->as_parent->children;
-  while(!list_empty (l))
+  l = &cur->as_parent->children;
+  while (!list_empty (l))
   {
     //add another semaphore to protect child.. not to mark lifetime
     struct list_elem *e = list_pop_front (l);
-    list_remove (e);
     struct child *c = list_entry (e, struct child, elem);
     sema_down (&c->protection);
     switch (c->state)
@@ -222,10 +232,14 @@ process_exit (void)
     }
   }
 
+  /* remove the struct parent for this thread */
   list_remove (&cur->as_parent->elem);
   free(cur->as_parent);
 
   /* clean up struct child */
+  if (cur->as_child == NULL) //initial thread is not a child of anybody
+    return;
+
   sema_down (&cur->as_child->protection);
   switch (cur->as_child->state)
   {
@@ -276,6 +290,7 @@ process_init (void)
   if(p != NULL){
     list_init(&p->children);
     thread_current ()->as_parent = p;
+    thread_current ()->as_child = NULL;
     list_push_back(&process_graph, &p->elem);
   }else{
     PANIC("initial thread parent struct not allocated\n");
@@ -283,31 +298,42 @@ process_init (void)
 }
 
 
-/*Called from the parent on child creation to register
-  the created process as a child of the current process.
-  And adds it as a new potential parent
-  Returns a nonzero value if the child was registered correctly
+/*
+  This function is called by the parent thread to register
+  child_thread as its own child (so that it can wait on it if
+  the child is a user process), and to register the child
+  as a new potential parent (even if the child were a kernel thread,
+  it should still be allowed to run child user processes).
+
+  Returns true if the child was registered correctly
   */
 bool
-process_register_child(struct thread *child_thread, tid_t child_id)
+process_register_child(struct thread *child_thread, thread_func func)
 {
   struct child *c = (struct child*)malloc(sizeof (struct child));
   if(c == NULL)
     return false;
 
-  c->child_id = child_id;
+  c->child_id = child_thread->tid;
   c->status = -1;
-  c->state = IN_CREATION;
+  if(func == start_process)
+    c->state = IN_CREATION;
+  else
+    c->state = ZOMBIFIED; //the parent will never wait on it
   sema_init(&c->sema, 0);
   sema_init (&c->protection, 1);
   child_thread->as_child = c;
 
-  /*Get my parent from the graph*/
-  struct parent *p = thread_current ()->as_parent;
-  list_push_front(&p->children, &c->elem);
+  /* register me as a child of my parent to allow it to wait on me
+    Don't register me if I am a kernel thread*/
+  if(c->state == IN_CREATION)
+  {
+    struct parent *p = thread_current ()->as_parent;
+    list_push_front(&p->children, &c->elem);  
+  }
 
   /*Register me as an independent parent*/
-  p = (struct parent*)malloc(sizeof (struct parent));
+  struct parent *p = (struct parent*)malloc(sizeof (struct parent));
   if(p == NULL)
     return false;
   

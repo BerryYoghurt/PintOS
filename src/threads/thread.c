@@ -202,7 +202,7 @@ thread_create (const char *name, int priority,
     Both: the parent will see the semaphore right when this function returns
           the child will see the semaphore right when it starts 
     If child creation fails before that, it will have no entry in the hash table*/
-  if(!process_register_child(t,tid))
+  if(!process_register_child(t,function))
   {
     palloc_free_page(t);
     return TID_ERROR;

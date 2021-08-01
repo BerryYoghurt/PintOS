@@ -62,10 +62,10 @@ syscall_handler (struct intr_frame *f)
       f->eax = syscall_wait((pid_t)args[0]);
     break;
   case SYS_CREATE:
-      *(bool*)&(f->eax) = syscall_create((char*)args[0],(unsigned)args[1]); /*is this correct?*/
+      f->eax = syscall_create((char*)args[0],(unsigned)args[1])? 1 : 0;
     break;
   case SYS_REMOVE:
-      *(bool*)&(f->eax) = syscall_remove((char*)args[0]);
+      f->eax = syscall_remove((char*)args[0])? 1 : 0;
     break;
   case SYS_OPEN:
       f->eax = syscall_open((char*)args[0]);
@@ -217,7 +217,7 @@ syscall_read (int fd, void *buffer, unsigned length)
     if(fd == 0)
     {
       char * buf = buffer;
-      for (int i = 0; i < length; i++)
+      for (unsigned i = 0; i < length; i++)
       {
         //should I put a lock here? can 2 processes get input at the same time??
         buf[i] = input_getc ();
@@ -278,11 +278,11 @@ validate_buffer (const void *buffer, unsigned int length)
 
     while(temp < (char*)buffer+length)
     {
-      if(temp >= PHYS_BASE || pagedir_get_page(pd,temp) == NULL)
+      if(temp >= (char*)PHYS_BASE || pagedir_get_page(pd,temp) == NULL)
       {
         thread_exit();
       }
-      temp = (char*)pg_round_up((void*)temp);
+      temp = (char*)pg_round_up((void*)temp + 1);
     }
 }
 
@@ -323,6 +323,7 @@ syscall_close (int fd)
   struct file *f = find_file (fd);
   if(f == NULL)
     thread_exit ();
+  list_remove (&f->elem);
   lock_acquire (&filesys_lock);
     file_close (f);
   lock_release (&filesys_lock);
