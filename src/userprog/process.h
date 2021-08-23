@@ -42,6 +42,6 @@ int process_wait (tid_t);
 void process_exit (void);
 void process_activate (void);
 void process_init (void);
-bool process_register_child (struct thread *, tid_t);
+bool process_register_child (struct thread *, thread_func);
 
 #endif /* userprog/process.h */
