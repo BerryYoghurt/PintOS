@@ -11,6 +11,8 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "devices/timer.h"
+#include "threads/malloc.h"
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -28,6 +30,9 @@ static struct list ready_list;
    when they are first scheduled and removed when they exit. */
 static struct list all_list;
 
+/* List of sleeping threads.*/
+static struct list sleeping_threads;
+
 /* Idle thread. */
 static struct thread *idle_thread;
 
@@ -37,12 +42,26 @@ static struct thread *initial_thread;
 /* Lock used by allocate_tid(). */
 static struct lock tid_lock;
 
+/* Lock to protect sleeping threads list*/
+static struct lock sleeping_lock;
+
 /* Stack frame for kernel_thread(). */
 struct kernel_thread_frame 
   {
     void *eip;                  /* Return address. */
     thread_func *function;      /* Function to call. */
     void *aux;                  /* Auxiliary data for function. */
+  };
+
+/*Information needed for sleeping*/
+struct sleeping_thread
+  {
+    struct list_elem elem;
+    //struct thread *pointer; have a new idea, use semaphores instead of blocking/unblocking the thread yourself
+    struct semaphore sem;
+    //int64_t sleep_start;
+    //int64_t sleep_duration;
+    int64_t wake_up_time;
   };
 
 /* Statistics. */
@@ -70,6 +89,7 @@ static void *alloc_frame (struct thread *, size_t size);
 static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
+static list_less_func sleep_cmp;
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -90,8 +110,10 @@ thread_init (void)
   ASSERT (intr_get_level () == INTR_OFF);
 
   lock_init (&tid_lock);
+  lock_init (&sleeping_lock);
   list_init (&ready_list);
   list_init (&all_list);
+  list_init (&sleeping_threads);
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
@@ -123,6 +145,32 @@ void
 thread_tick (void) 
 {
   struct thread *t = thread_current ();
+
+  /*wake up all threads that should wake up now or should have waken up before*/
+  int64_t now = timer_ticks();
+
+  //printf("ticks now = %lld\n", now);
+
+  //no need for semaphore because this function runs in an interrupt context anyway
+  struct list_elem *element = list_begin(&sleeping_threads);
+  struct sleeping_thread *sleeping_thread;
+  while(element != list_end(&sleeping_threads)){
+
+    sleeping_thread = list_entry(element, struct sleeping_thread, elem);
+    //printf("list element with wake up time = %lld\n", sleeping_thread->wake_up_time);
+    /*printf("<thread_tick>time elapsed = %lld subtraction = %lld",
+           timer_elapsed(sleeping_thread->sleep_start),
+           timer_ticks() - sleeping_thread->sleep_start);*/
+
+    if(sleeping_thread->wake_up_time <= now){
+
+      sema_up(&(sleeping_thread->sem));
+      element = list_remove(element);
+
+    }else{
+      break;
+    }
+  }
 
   /* Update statistics. */
   if (t == idle_thread)
@@ -250,6 +298,46 @@ thread_unblock (struct thread *t)
   list_push_back (&ready_list, &t->elem);
   t->status = THREAD_READY;
   intr_set_level (old_level);
+}
+
+/*comparator for sleeping threads*/
+bool sleep_cmp(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED){
+  struct sleeping_thread* thread_a = 
+                  list_entry(a, struct sleeping_thread, elem);
+
+  struct sleeping_thread* thread_b = 
+                  list_entry(b, struct sleeping_thread, elem);
+  
+  return thread_a->wake_up_time < thread_b->wake_up_time;
+}
+
+/*Adds the thread to sleeping list and blocks it.*/
+void
+thread_sleep(int64_t sleep_start, int64_t sleep_duration){
+  struct sleeping_thread* sleeping_thread = (struct sleeping_thread*) malloc(sizeof (struct sleeping_thread));
+
+  //printf("<thread_sleep>sleep for %lld ticks\n", sleep_duration);
+  ASSERT(sleeping_thread != NULL) //what checks should I put here?
+  /*thread_sleep is only ever called from timer_sleep, and interrupts should be enabled*/
+  ASSERT(intr_get_level() == INTR_ON);
+  
+
+  //sleeping_thread->pointer = thread_current();
+  sema_init(&(sleeping_thread->sem),0);
+  sleeping_thread->wake_up_time = sleep_start + sleep_duration;
+
+  //printf("Calling lock_acquire not interrupt context\n");
+  ASSERT(!intr_context());
+  lock_acquire(&sleeping_lock);
+
+  //printf("inserting thread with wake up time = %lld\n", sleeping_thread->wake_up_time);
+
+  list_insert_ordered(&sleeping_threads, &(sleeping_thread->elem), sleep_cmp, NULL);
+  lock_release(&sleeping_lock);
+
+  sema_down(&(sleeping_thread->sem));
+  //printf("thread woke up\n");
+  free(sleeping_thread);
 }
 
 /* Returns the name of the running thread. */
@@ -385,7 +473,6 @@ thread_get_recent_cpu (void)
   /* Not yet implemented. */
   return 0;
 }
-
 /* Idle thread.  Executes when no other thread is ready to run.
 
    The idle thread is initially put on the ready list by
