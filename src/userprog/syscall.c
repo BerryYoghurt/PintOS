@@ -10,13 +10,13 @@
 #include "filesys/filesys.h"
 #include "filesys/file.h"
 #include "devices/input.h"
+#include "threads/pte.h"
 
 static void syscall_handler (struct intr_frame *);
 static void validate_filename (char *);
 static void validate_four_bytes (void*);
 static void validate_buffer (const void*, unsigned);
 static struct file *find_file (int);
-static list_predicate_func file_with_descriptor;
 
 static struct lock filesys_lock; /*A lock to be used everywhere the filesystem is 
                                    accessed because I have no idea how it works or what
@@ -32,8 +32,9 @@ syscall_init (void)
 static void
 syscall_handler (struct intr_frame *f) 
 {
-  /*Any invalid address here shall be caught in page_fault safely
-  because no locks are held and no dynamic memory is allocated*/
+  /* If any address here is not mapped, this means that the process is faulty,
+  not that I should grow the stack, because this address should have already been
+  accessed by the process (and data was put in it)*/
   void* esp = f->esp;
   validate_four_bytes(esp);
   int intr_number = *((int*)esp);
@@ -94,13 +95,14 @@ syscall_handler (struct intr_frame *f)
   }
 }
 
+/* Ensure these addresses are mapped. */
 static void
 validate_four_bytes(void *ptr)
 {
   uint32_t *pd = thread_current ()->pagedir;
-  bool valid = ptr < PHYS_BASE && pagedir_get_page(pd, ptr) != NULL;
+  bool valid = ptr < PHYS_BASE && pagedir_is_mapped(pd, ptr);
   ptr = (char*)ptr + 3;
-  valid = valid && ptr < PHYS_BASE && pagedir_get_page(pd, ptr) != NULL;
+  valid = valid && ptr < PHYS_BASE && pagedir_is_mapped(pd, ptr);
   if(!valid)
     thread_exit();
 }
@@ -122,8 +124,8 @@ void syscall_exit (int status)
 pid_t syscall_exec (char *file)
 {
   validate_filename(file); 
-  //TODO, add the executable to the files opened by the thread to deny writes
   tid_t t = process_execute(file);
+  unpin_filename (file);
   if(t == TID_ERROR)
     return -1;
   return t;
@@ -141,6 +143,7 @@ syscall_create (char *file, unsigned initial_size)
   lock_acquire (&filesys_lock);
   bool ret = filesys_create (file, initial_size);
   lock_release (&filesys_lock);
+  unpin_filename (file);
   return ret;
 }
 
@@ -151,6 +154,7 @@ syscall_remove (char *file)
   lock_acquire (&filesys_lock);
   bool ret = filesys_remove (file);
   lock_release (&filesys_lock);
+  unpin_filename (file);
   return ret;
 }
 
@@ -162,13 +166,14 @@ syscall_open (char *file)
   lock_acquire (&filesys_lock);
   struct file * f = filesys_open (file);
   lock_release (&filesys_lock);
+  unpin_filename (file);
 
   if(f == NULL)
     return -1;
 
-  f->descriptor = list_size (&t->opened_files) + 2; //for now
+  int descriptor = list_size (&t->opened_files) + 2; //for now
   list_push_back (&t->opened_files, &f->elem);
-  return f->descriptor;
+  return descriptor;
 }
 
 int 
@@ -187,20 +192,17 @@ static struct file *
 find_file (const int fd)
 {
   struct thread * t = thread_current ();
-  struct list_elem *e = list_find (&t->opened_files,
-                                    file_with_descriptor,
-                                    (void*)fd);
-  if(e == NULL)
-    return NULL;
-  return list_entry (e, struct file, elem);
-}
-
-/* Predicate to pick struct file with descriptor equal to AUX */
-static bool
-file_with_descriptor (const struct list_elem * e, void *aux)
-{
-  struct file *f = list_entry (e, struct file, elem);
-  return f->descriptor == (int) aux;
+  int i = 2;
+  for(struct list_elem *e = list_begin(&t->opened_files);
+      e != list_end(&t->opened_files);
+      e = list_next (&t->opened_files), i++)
+    {
+      if (i == fd)
+      {
+        return list_entry (e, struct file, elem);
+      }
+    }
+  return NULL;
 }
 
 int 
@@ -222,6 +224,7 @@ syscall_read (int fd, void *buffer, unsigned length)
         //should I put a lock here? can 2 processes get input at the same time??
         buf[i] = input_getc ();
       }
+      unpin_buffer (buffer, length);
       return length;
     }
     else
@@ -229,9 +232,11 @@ syscall_read (int fd, void *buffer, unsigned length)
       struct file *f = find_file (fd);
       if(f == NULL)
         thread_exit ();
+      //TODO remove this lock after you understand how inode.data.length works
       lock_acquire (&filesys_lock);
         int ret = file_read (f, buffer, length);
       lock_release (&filesys_lock);
+      unpin_buffer (buffer, length);
       return ret;
     }
   }
@@ -252,6 +257,7 @@ syscall_write (int fd, const void *buffer, unsigned length)
     {
       /*not restricting the size of buffer for the time being*/
       putbuf((char*)buffer, length);
+      unpin_buffer (buffer, length);
       return (int)length;
     }
     else
@@ -259,9 +265,11 @@ syscall_write (int fd, const void *buffer, unsigned length)
       struct file *f = find_file (fd);
       if(f == NULL)
         thread_exit ();
+      //todo remove lock
       lock_acquire (&filesys_lock);
         int ret = file_write (f, buffer, length);
       lock_release (&filesys_lock);
+      unpin_buffer (buffer, length);
       return ret;
     }
   }
@@ -278,12 +286,29 @@ validate_buffer (const void *buffer, unsigned int length)
 
     while(temp < (char*)buffer+length)
     {
-      if(temp >= (char*)PHYS_BASE || pagedir_get_page(pd,temp) == NULL)
+      if(temp >= (char*)PHYS_BASE || !pagedir_is_mapped(pd,temp))
       {
         thread_exit();
       }
+      
+      frame_fetch_page (temp, true);
+
       temp = (char*)pg_round_up((void*)temp + 1);
     }
+}
+
+static void
+unpin_buffer (const void *buffer, unsigned int length)
+{
+  const char *temp = (char*)buffer;
+  uint32_t *pd = thread_current ()->pagedir;
+
+  while(temp < (char*)buffer+length)
+  {
+    frame_unpin (pagedir_get_page (pd, temp));
+
+    temp = (char*)pg_round_up((void*)temp + 1);
+  }
 }
 
 void syscall_seek (int fd, unsigned position){
@@ -329,17 +354,45 @@ syscall_close (int fd)
   lock_release (&filesys_lock);
 }
 
-void
+/* Ensure filename is mapped, fetch its pages if not present and pins them.
+   Remember to unpin at the end*/
+static void
 validate_filename (char * file)
 {
   if(file == NULL)
     thread_exit();
   char* temp = file - 1;
   uint32_t *pd = thread_current ()->pagedir;
+  uintptr_t curr_pg, prev_pg = NULL;
   do{
     temp++;
-    if((void*)temp >= PHYS_BASE || pagedir_get_page(pd, (void*)temp) == NULL){
+    curr_pg = pg_no (temp);
+    if((void*)temp >= PHYS_BASE || !pagedir_is_mapped(pd, (void*)temp)){
       thread_exit();
     }
+    if(curr_pg != prev_pg)
+    {
+      frame_fetch_page (temp, true);
+    }
+    prev_pg = curr_pg;
+  }while(*temp != '\0');
+}
+
+
+/* Unpins the pages occupied by file */
+static void
+unpin_filename (char *file)
+{
+  char* temp = file - 1;
+  uint32_t *pd = thread_current ()->pagedir;
+  void *curr_pg, *prev_pg = NULL;
+  do{
+    temp++;
+    curr_pg = pg_no (temp);
+    if(curr_pg != prev_pg)
+    {
+      frame_unpin (pagedir_get_page (pd, temp));
+    }
+    prev_pg = curr_pg;
   }while(*temp != '\0');
 }

@@ -19,9 +19,9 @@
 #include "threads/malloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "vm/frame-table.h"
 
 /*A graph to keep track of parent-child relationships*/
-//static struct hash process_graph;
 static struct list process_graph;
 static struct lock graph_lock;
 
@@ -185,11 +185,11 @@ process_exit (void)
          that's been freed (and cleared). */
       cur->pagedir = NULL;
       pagedir_activate (NULL);
-      pagedir_destroy (pd);
+      pagedir_destroy (pd); //TODO destroy here the supplementary ptes
       
       /*Question: why do we need to deny write for the whole running duration
-        not just for the loading duration? virtual memory?*/
-      file_close (cur->executable); //file cannot be nonnull if pagedir is null (see load)
+        not just for the loading duration? virtual memory? YES*/
+      file_close (cur->executable); //file cannot be nonnull if pagedir is nonnull (see load)
       
       //printf must be here so that even if kernel kills the process, it will print
       printf("%s: exit(%d)\n",cur->name,cur->as_child->status);
@@ -650,67 +650,67 @@ setup_stack (const char *cmdline, void **esp)
   bool success = false;
 
   kpage = palloc_get_page (PAL_USER | PAL_ZERO);
-  if (kpage != NULL) 
-    {
-      success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
-      if (success)
+  ASSERT (kpage != NULL);
+  success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
+  if (success)
+  {
+    int argc = 0, size = strlen(cmdline)+1;
+    char *save_ptr, *token;
+    void * top_of_stack = PHYS_BASE;
+
+    /*copy cmdline to the allocated page so that I can split it with strtok_r*/
+    token = (char*)top_of_stack - size;
+    strlcpy(token, cmdline, size);
+    top_of_stack = (void *)token;
+
+    for (token = strtok_r (token, " ", &save_ptr); token != NULL;
+                token = strtok_r (NULL, " ", &save_ptr))
       {
-        int argc = 0, size = strlen(cmdline)+1;
-        char *save_ptr, *token;
-        void * top_of_stack = PHYS_BASE;
-
-        /*copy cmdline to the allocated page so that I can split it with strtok_r*/
-        token = (char*)top_of_stack - size;
-        strlcpy(token, cmdline, size);
-        top_of_stack = (void *)token;
-
-        for (token = strtok_r (token, " ", &save_ptr); token != NULL;
-                    token = strtok_r (NULL, " ", &save_ptr))
-          {
-            argc++;
-            /*store the addresses on the stack temporarily*/
-            top_of_stack = (char**)top_of_stack - 1;
-            *(char**)top_of_stack = token;
-          }
-
-        char* adr[argc];
-        for(int i = argc-1; i >= 0; i--)
-          {
-            adr[i] = *(char**)top_of_stack;
-            top_of_stack = (char**)top_of_stack + 1;
-          }
-
-        /*word align*/
-        if((unsigned)top_of_stack % 4 != 0){
-          top_of_stack -= (unsigned)top_of_stack % 4;
-        }
-
-        /*push null word*/
-        top_of_stack = (int*)top_of_stack - 1;
-        *(int*)top_of_stack = 0;
-
-        /*push contents of argv*/
-        for(int i = argc-1; i >= 0; i--){
-          top_of_stack = (char**)top_of_stack - 1;
-          *(char **)top_of_stack = adr[i];
-        }
-        /*push argv*/
-        *((char***)top_of_stack - 1) = top_of_stack;
-        top_of_stack = (char***)top_of_stack - 1;
-        /*push argc*/
-        top_of_stack = (int*)top_of_stack - 1;
-        *(int *)top_of_stack = argc;
-
-        /*push dummy return address*/
-        top_of_stack = (void **)top_of_stack - 1;
-        *(void **)top_of_stack = (void*)0xaaaaaaaa;
-
-        *esp = top_of_stack;
-        //hex_dump((uintptr_t)*esp, *esp, 0x50,true);
+        argc++;
+        /*store the addresses on the stack temporarily*/
+        top_of_stack = (char**)top_of_stack - 1;
+        *(char**)top_of_stack = token;
       }
-      else
-        palloc_free_page (kpage);
+
+    char* adr[argc];
+    for(int i = argc-1; i >= 0; i--)
+      {
+        adr[i] = *(char**)top_of_stack;
+        top_of_stack = (char**)top_of_stack + 1;
+      }
+
+    /*word align*/
+    if((unsigned)top_of_stack % 4 != 0){
+      top_of_stack -= (unsigned)top_of_stack % 4;
     }
+
+    /*push null word*/
+    top_of_stack = (int*)top_of_stack - 1;
+    *(int*)top_of_stack = 0;
+
+    /*push contents of argv*/
+    for(int i = argc-1; i >= 0; i--){
+      top_of_stack = (char**)top_of_stack - 1;
+      *(char **)top_of_stack = adr[i];
+    }
+    /*push argv*/
+    *((char***)top_of_stack - 1) = top_of_stack;
+    top_of_stack = (char***)top_of_stack - 1;
+    /*push argc*/
+    top_of_stack = (int*)top_of_stack - 1;
+    *(int *)top_of_stack = argc;
+
+    /*push dummy return address*/
+    top_of_stack = (void **)top_of_stack - 1;
+    *(void **)top_of_stack = (void*)0xaaaaaaaa;
+
+    *esp = top_of_stack;
+    //hex_dump((uintptr_t)*esp, *esp, 0x50,true);
+    frame_unpin (kpage);
+  }
+  else
+    palloc_free_page (kpage);
+    
   return success;
 }
 
@@ -730,6 +730,11 @@ install_page (void *upage, void *kpage, bool writable)
 
   /* Verify that there's not already a page at that virtual
      address, then map our page there. */
-  return (pagedir_get_page (t->pagedir, upage) == NULL
-          && pagedir_set_page (t->pagedir, upage, kpage, writable));
+  if (pagedir_get_page (t->pagedir, upage) == NULL
+          && pagedir_set_page (t->pagedir, upage, kpage, writable))
+    {
+      return frame_create (t->pagedir, kpage, upage);
+    }
+  else
+    return false;
 }

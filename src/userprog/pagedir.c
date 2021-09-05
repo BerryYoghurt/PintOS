@@ -5,6 +5,7 @@
 #include "threads/init.h"
 #include "threads/pte.h"
 #include "threads/palloc.h"
+#include "vm/frame-table.h"
 
 static uint32_t *active_pd (void);
 static void invalidate_pagedir (uint32_t *);
@@ -33,6 +34,7 @@ pagedir_destroy (uint32_t *pd)
     return;
 
   ASSERT (pd != init_page_dir);
+  //if I understand correctly, this only frees the user pages.
   for (pde = pd; pde < pd + pd_no (PHYS_BASE); pde++)
     if (*pde & PTE_P) 
       {
@@ -40,8 +42,27 @@ pagedir_destroy (uint32_t *pd)
         uint32_t *pte;
         
         for (pte = pt; pte < pt + PGSIZE / sizeof *pte; pte++)
-          if (*pte & PTE_P) 
+        {
+          /* Concurrent eviction of pages and exiting of processes opens a big can of worms..
+            (NULL pointers (if pd is freed before other process completes eviction)
+             Memory leakage (if stack is written to swap because other process has no idea 
+             that this process is exiting and this process cannot be sure of anything!))
+            It is better to lock here so that I can be sure no other process can
+            evict a frame which I think is present. */
+          lock_acquire (&replacement_lock);
+          if (*pte & PTE_P)
+          {
+            ASSERT(*pte & PTE_U);
+            //TODO flush
+            frame_free (pte_get_page (*pte));
             palloc_free_page (pte_get_page (*pte));
+          }
+          else
+          {
+            //TODO, check swap 
+          }
+          lock_release (&replacement_lock);
+        }
         palloc_free_page (pt);
       }
   palloc_free_page (pd);
@@ -214,6 +235,16 @@ pagedir_set_accessed (uint32_t *pd, const void *vpage, bool accessed)
     }
 }
 
+
+/* Returns true if there exits a mapping for vpage in pd, even
+   if it's not present in physical memory. */
+bool
+pagedir_is_mapped (uint32_t *pd, const void *vpage)
+{
+  uint32_t *pte = lookup_page (pd, vpage, false);
+  return pte != NULL;
+}
+
 /* Loads page directory PD into the CPU's page directory base
    register. */
 void
@@ -260,4 +291,10 @@ invalidate_pagedir (uint32_t *pd)
          "Translation Lookaside Buffers (TLBs)". */
       pagedir_activate (pd);
     } 
+}
+
+bool
+pagedir_is_destoryed (void)
+{
+  return active_pd () == init_page_dir;
 }

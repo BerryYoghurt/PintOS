@@ -103,6 +103,9 @@ struct thread
     struct file *executable;
     struct list opened_files;    
 
+    /* Owned by vm/frame_table */
+                                       /* Owned frames */
+                                       /* List of supplementary page table entries (allocated in kernel)*/
 //#endif
 
     /* Owned by thread.c. */

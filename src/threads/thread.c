@@ -149,18 +149,12 @@ thread_tick (void)
   /*wake up all threads that should wake up now or should have waken up before*/
   int64_t now = timer_ticks();
 
-  //printf("ticks now = %lld\n", now);
-
   //no need for semaphore because this function runs in an interrupt context anyway
   struct list_elem *element = list_begin(&sleeping_threads);
   struct sleeping_thread *sleeping_thread;
   while(element != list_end(&sleeping_threads)){
 
     sleeping_thread = list_entry(element, struct sleeping_thread, elem);
-    //printf("list element with wake up time = %lld\n", sleeping_thread->wake_up_time);
-    /*printf("<thread_tick>time elapsed = %lld subtraction = %lld",
-           timer_elapsed(sleeping_thread->sleep_start),
-           timer_ticks() - sleeping_thread->sleep_start);*/
 
     if(sleeping_thread->wake_up_time <= now){
 
@@ -559,6 +553,7 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  t->executable = NULL;
   list_init(&t->opened_files);
   t->magic = THREAD_MAGIC;
 
