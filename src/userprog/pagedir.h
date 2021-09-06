@@ -14,6 +14,10 @@ void pagedir_set_dirty (uint32_t *pd, const void *upage, bool dirty);
 bool pagedir_is_accessed (uint32_t *pd, const void *upage);
 void pagedir_set_accessed (uint32_t *pd, const void *upage, bool accessed);
 bool pagedir_is_mapped (uint32_t *pd, const void *upage);
+uint32_t pagedir_get_supp (uint32_t *pd, const void *upage);
+void pagedir_set_supp (uint32_t *pd, const void *upage, uint32_t supp_idx);
+bool pagedir_is_writable (uint32_t *pd, const void *upage);
+bool pagedir_is_file (uint32_t *pd, const void *upage);
 void pagedir_activate (uint32_t *pd);
 
 /* For debugging */

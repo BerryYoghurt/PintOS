@@ -6,6 +6,7 @@
 #include "threads/pte.h"
 #include "threads/palloc.h"
 #include "vm/frame-table.h"
+#include "vm/supp-table.h"
 
 static uint32_t *active_pd (void);
 static void invalidate_pagedir (uint32_t *);
@@ -157,6 +158,29 @@ pagedir_get_page (uint32_t *pd, const void *uaddr)
     return NULL;
 }
 
+
+/* Returns the index of the supplementary page table entry. 
+   The address must be mapped but not present. */
+uint32_t
+pagedir_get_supp (uint32_t *pd, const void *upage)
+{
+  uint32_t *pte = lookup_page (pd, upage, false);
+  ASSERT (pte != NULL);
+  ASSERT (*pte & PTE_P == 0);
+  return (*pte) >> 12;
+}
+
+
+/* Sets the index of the supplementary page table entry. */
+void
+pagedir_set_supp (uint32_t *pd, const void *upage, uint32_t supp_idx)
+{
+  uint32_t *pte = lookup_page (pd, upage, false);
+  ASSERT (pte != NULL);
+  ASSERT (*pte & PTE_P == 0);
+  *pte = (supp_idx<<12) | (*pte & ~PTE_ADDR);
+}
+
 /* Marks user virtual page UPAGE "not present" in page
    directory PD.  Later accesses to the page will fault.  Other
    bits in the page table entry are preserved.
@@ -244,6 +268,23 @@ pagedir_is_mapped (uint32_t *pd, const void *vpage)
   uint32_t *pte = lookup_page (pd, vpage, false);
   return pte != NULL;
 }
+
+/* Returns true if writable. */
+bool
+pagedir_is_writable (uint32_t *pd, const void *upage)
+{
+  uint32_t *pte = lookup_page (pd, upage, false);
+  return *pte & PTE_W;
+}
+
+
+bool
+pagedir_is_file (uint32_t *pd, const void *upage)
+{
+  uint32_t *pte = lookup_page (pd, upage, false);
+  return *pte & PTE_FILE;
+}
+
 
 /* Loads page directory PD into the CPU's page directory base
    register. */

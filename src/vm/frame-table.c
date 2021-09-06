@@ -3,6 +3,8 @@
 #include "../threads/malloc.h"
 #include "userprog/pagedir.h"
 #include "threads/vaddr.h"
+#include "threads/pte.h"
+#include "vm/supp-table.h"
 
 static struct hash frame_table;
 static struct lock table_lock;
@@ -41,7 +43,7 @@ frame_init (void/*size_t frame_cnt, uint8_t starting_at*/)
 }
 
 
-/* Frees the memory allocated for this frame. 
+/* Frees the memory allocated for this frame.
  This function must only be called from pagedir_destroy, 
  if a process creation fails, then only the page and not the frame should be freed
  because the page should not have been mapped yet*/
@@ -69,14 +71,14 @@ frame_free (void *kpage)
 
     /*if it were null, then it should not have been present and frame free
      should not have been called!*/
-    ASSERT(frame != NULL); 
+    ASSERT(frame != NULL);
     free((void*) frame);
 }
 
 
-/* Evicts a frame, removes its entry from the frame table,
+/* Evicts a frame, flushes, removes and frees its entry from the frame table,
  and returns its kernel virtual address. */
-void *
+static void *
 frame_replace (void)
 {
     return NULL;
@@ -84,16 +86,20 @@ frame_replace (void)
 
 
 /* Flushes the frame depending on its type */
-void
+static void
 frame_flush (void *kpage)
 {
 
 }
 
 /* Creates a new pinned frame with these associations
- and inserts it into the table.*/
+ and inserts it into the table.
+ It also marks the pte present.*/
 bool
-frame_create (uint32_t *pd, void *kpage, void *upage, bool pin)
+frame_create (uint32_t *pd, 
+              void *kpage, 
+              void *upage, 
+              bool pin)
 {
     struct fte *frame = (struct fte*) malloc (sizeof(struct fte));
     if(frame == NULL)
@@ -101,7 +107,13 @@ frame_create (uint32_t *pd, void *kpage, void *upage, bool pin)
     frame->physical_address = kpage;
     frame->virtual_address = upage;
     frame->pd = pd;
-    sema_init(&frame->sema, pin?0:1);
+    frame->pinned = pin;
+    frame->supp_entry = pagedir_get_supp (pd, upage);
+    if(!pagedir_set_page (pd, upage, kpage, pagedir_is_writable (pd, upage)))
+    {
+        free (frame);
+        return false;
+    }   
     lock_acquire (&table_lock);
     hash_insert (&frame_table, &frame->hash_elem);
     lock_release (&table_lock);
@@ -144,27 +156,22 @@ frame_get_address (void* addr)
 }
 
 
-/* Tries to pin frame. */
-void
-frame_pin (void *kpage)
-{
-    struct fte* fte = frame_get_address (kpage);
-    return sema_try_down (&fte->sema);
-}
-
 void
 frame_unpin (void *kpage)
 {
     struct fte* fte = frame_get_address (kpage);
-    if(sema_try_down (&fte->sema))
-        NOT_REACHED ();
-    sema_up (&fte->sema);
+    ASSERT (fte->pinned);
+    fte->pinned = false;
 }
 
-/* Fetches a page if not already there and returns its kernel virtual address. */
+/* Fetches a page if not already there and returns its kernel virtual address.
+   The user address must be mapped */
 void *
 frame_fetch_page (uint32_t *pd, void *uaddr, bool pin)
 {
+    //TODO: pinned being bool might cause some problems if the pinned
+    //frame is shared.. 
+    ASSERT (pagedir_is_mapped (pd, uaddr));
     lock_acquire (&replacement_lock);
     void *kpage = pagedir_get_page (pd, uaddr);
     if(kpage == NULL)
@@ -172,10 +179,18 @@ frame_fetch_page (uint32_t *pd, void *uaddr, bool pin)
         //if sharing is enabled, check type to find read only etc
         kpage = frame_replace ();
         //switch on type, fetch page and put in kpage.. bla bla bla
+        if(pagedir_is_file (pd, uaddr))
+        {
+            
+        }
+        else
+        {
+            //fetch from swap partition
+        }
         frame_create (pd, kpage, uaddr, pin);
     }
     else
-        if (pin)
-            frame_pin (kpage);
+        if(pin)
+            frame_get_address (kpage)->pinned = true;
     lock_release (&replacement_lock);
 }

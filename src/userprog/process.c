@@ -20,6 +20,7 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 #include "vm/frame-table.h"
+#include "vm/supp-table.h"
 
 /*A graph to keep track of parent-child relationships*/
 static struct list process_graph;
@@ -434,6 +435,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
   t->pagedir = pagedir_create ();
   if (t->pagedir == NULL) 
     goto done;
+  t->supp_pagedir = supp_table_create ();
   process_activate ();
 
   /* Open executable file. */
