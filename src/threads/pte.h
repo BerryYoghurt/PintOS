@@ -57,7 +57,14 @@ static inline uintptr_t pd_no (const void *va) {
    When a PDE or PTE is not "present", the other flags are
    ignored.
    A PDE or PTE that is initialized to 0 will be interpreted as
-   "not present", which is just fine. */
+   "not present", which is just fine. 
+   
+   About the PTE_FILE flag:
+    One of the AVL bits in the pte. If true then it's a file, else a stack page.
+    Whether it's a memory mapped file or this process's executable
+    doesn't matter, because a memory mapped file here could be
+    an executable there, and either way writes should be denied
+    */
 #define PTE_FLAGS 0x00000fff    /* Flag bits. */
 #define PTE_ADDR  0xfffff000    /* Address bits. */
 #define PTE_AVL   0x00000e00    /* Bits available for OS use. */
@@ -66,6 +73,8 @@ static inline uintptr_t pd_no (const void *va) {
 #define PTE_U 0x4               /* 1=user/kernel, 0=kernel only. */
 #define PTE_A 0x20              /* 1=accessed, 0=not acccessed. */
 #define PTE_D 0x40              /* 1=dirty, 0=not dirty (PTEs only). */
+#define PTE_FILE 0x200          /* 1=file page, 0=stack page (PTEs only). */
+#define PTE_M 0x400             /* 1=mapped user pte, 0=not mapped */
 
 /* Returns a PDE that points to page table PT. */
 static inline uint32_t pde_create (uint32_t *pt) {
@@ -89,12 +98,14 @@ static inline uint32_t pte_create_kernel (void *page, bool writable) {
   return vtop (page) | PTE_P | (writable ? PTE_W : 0);
 }
 
-/* Returns a PTE that points to PAGE.
+/* Returns a PTE with supplementary entry SUPP_IDX.
    The PTE's page is readable.
    If WRITABLE is true then it will be writable as well.
-   The page will be usable by both user and kernel code. */
-static inline uint32_t pte_create_user (void *page, bool writable) {
-  return pte_create_kernel (page, writable) | PTE_U;
+   The page will be usable by both user and kernel code. 
+   It is marked mapped and the supplementary page table entry is registered. 
+   It is not, however, marked present*/
+static inline uint32_t pte_create_user (uint32_t supp_idx, bool writable, bool file) {
+  return PTE_U | PTE_M | supp_idx << 12 | (writable ? PTE_W : 0) | (file ? PTE_FILE : 0);
 }
 
 /* Returns a pointer to the page that page table entry PTE points

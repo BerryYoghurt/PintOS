@@ -11,11 +11,18 @@
 #include "filesys/file.h"
 #include "devices/input.h"
 #include "threads/pte.h"
+#include <list.h>
+#include "threads/malloc.h"
+#include "vm/frame-table.h"
+#include "vm/supp-table.h"
+#include "vm/mmap.h"
 
 static void syscall_handler (struct intr_frame *);
 static void validate_filename (char *);
+static void unpin_filename (char *);
 static void validate_four_bytes (void*);
 static void validate_buffer (const void*, unsigned);
+static void unpin_buffer (const void*, unsigned);
 static struct file *find_file (int);
 
 static struct lock filesys_lock; /*A lock to be used everywhere the filesystem is 
@@ -89,6 +96,12 @@ syscall_handler (struct intr_frame *f)
   case SYS_CLOSE:
       syscall_close((int)args[0]);
     break;
+  case SYS_MMAP:
+      f->eax = syscall_mmap((int)args[0], (void*)args[1]);
+      break;
+  case SYS_MUNMAP:
+      syscall_munmap((mapid_t)args[0]);
+      break;
   default:
     printf("Undefined system call %d\n",intr_number);
     break;
@@ -195,7 +208,7 @@ find_file (const int fd)
   int i = 2;
   for(struct list_elem *e = list_begin(&t->opened_files);
       e != list_end(&t->opened_files);
-      e = list_next (&t->opened_files), i++)
+      e = list_next (e), i++)
     {
       if (i == fd)
       {
@@ -291,7 +304,8 @@ validate_buffer (const void *buffer, unsigned int length)
         thread_exit();
       }
       
-      frame_fetch_page (temp, true);
+      if(!frame_fetch_page (pd, (void*)((uint32_t)temp & PTE_ADDR), true))
+        PANIC ("Frame fetch failed in syscall");
 
       temp = (char*)pg_round_up((void*)temp + 1);
     }
@@ -311,7 +325,8 @@ unpin_buffer (const void *buffer, unsigned int length)
   }
 }
 
-void syscall_seek (int fd, unsigned position){
+void 
+syscall_seek (int fd, unsigned position){
   if(fd == 0 || fd == 1)
     {
       thread_exit ();
@@ -354,6 +369,129 @@ syscall_close (int fd)
   lock_release (&filesys_lock);
 }
 
+
+mapid_t
+syscall_mmap (int fd, void *addr)
+{
+  int ans = -1;
+  if(addr == (void*)0 || pg_ofs(addr) != 0)
+    return -1;
+
+  struct file *old = find_file (fd);
+  if(old == NULL)
+    return -1;
+  
+  uint32_t size = file_length (old);
+  if(size == 0)
+    return -1;
+
+  struct thread *t = thread_current ();
+  struct file *file = file_reopen (old);
+  bool success = true;
+  for (void *curr_pg = addr; (uint32_t)curr_pg < (uint32_t)addr + size; curr_pg += PGSIZE)
+  {
+    if (pagedir_is_mapped (t->pagedir, curr_pg))
+    {
+      success = false;
+      goto done;
+    }
+    struct file_supp *info = (struct file_supp *)malloc(sizeof(struct file_supp));
+    if(info == NULL)
+    {
+      success = false;
+      goto done;
+    }
+    info->file = file;
+    info->offset = (uint32_t)addr - (uint32_t)curr_pg;
+    info->bytes = (size - info->offset > PGSIZE) ? PGSIZE : size - info->offset;
+    if(!pagedir_set_page (t->pagedir, curr_pg, true, true, (uint32_t)info))
+    {
+      free(info);
+      success = false;
+      goto done;
+    }
+  }
+
+  struct mapping *m = (struct mapping *) malloc (sizeof(struct mapping));
+  if(m == NULL)
+  {
+    success = false;
+    goto done;
+  }
+  m->file = file;
+  m->addr = addr;
+  ans = list_size (&t->mmapped_files);
+  list_push_back (&t->mmapped_files, &m->elem);
+
+  done:
+    if(!success)
+    {
+      for (void *curr_pg = addr; (uint32_t)curr_pg < (uint32_t)addr + size; curr_pg += PGSIZE)
+        {
+          if(pagedir_is_mapped (t->pagedir, curr_pg))
+          {
+            free((void *)supp_get_entry(t->supp_pagedir, 
+                                        pagedir_get_supp(t->pagedir, curr_pg)));
+            pagedir_set_unmapped (t->pagedir, curr_pg);
+          }
+          else
+            break;
+        }   
+      file_close (file);
+    }
+
+  return ans;
+}
+
+
+void
+syscall_munmap (mapid_t mapid)
+{
+  mapid_t i = 0;
+  struct mapping *m = NULL;
+  struct thread *t = thread_current ();
+  bool found = false;
+  for(struct list_elem *e = list_begin (&t->mmapped_files);
+      e != list_end (&t->mmapped_files);
+      e = list_next (e), ++i)
+    {
+      m = list_entry (e, struct mapping, elem);
+      if(i == mapid)
+      {
+        found = true;
+        break;
+      } 
+    }
+    
+  if(!found)
+    return;
+
+  uint32_t size = file_length (m->file);
+  void *kpage;
+  for (void *curr_pg = m->addr; 
+      (uint32_t)curr_pg < (uint32_t)m->addr + size; 
+      curr_pg += PGSIZE)
+    {
+      ASSERT (pagedir_is_file (t->pagedir, curr_pg));
+      lock_acquire (&replacement_lock);
+      if(pagedir_is_present (t->pagedir, curr_pg))
+        {
+          kpage = pagedir_get_page (t->pagedir, curr_pg);
+          frame_flush (kpage);
+          frame_free (kpage);
+        }
+      lock_release (&replacement_lock);
+      free((void *)supp_get_entry(t->supp_pagedir, 
+                                  pagedir_get_supp(t->pagedir, curr_pg)));
+      pagedir_set_unmapped (t->pagedir, curr_pg);
+    }
+
+  file_close (m->file);
+  list_remove (&m->elem); //TODO.. bug in the way I treat id's!!! what if 1 2 3 4, free 3, and I want 4!!
+  free((void*)m);
+}
+
+
 /* Ensure filename is mapped, fetch its pages if not present and pins them.
    Remember to unpin at the end*/
 static void
@@ -363,7 +501,7 @@ validate_filename (char * file)
     thread_exit();
   char* temp = file - 1;
   uint32_t *pd = thread_current ()->pagedir;
-  uintptr_t curr_pg, prev_pg = NULL;
+  uintptr_t curr_pg, prev_pg = -1;
   do{
     temp++;
     curr_pg = pg_no (temp);
@@ -372,7 +510,8 @@ validate_filename (char * file)
     }
     if(curr_pg != prev_pg)
     {
-      frame_fetch_page (temp, true);
+      if(!frame_fetch_page (pd, (void*)((uint32_t)temp & PTE_ADDR), true))
+        PANIC ("Frame fetch failed in syscall!");
     }
     prev_pg = curr_pg;
   }while(*temp != '\0');
@@ -385,7 +524,7 @@ unpin_filename (char *file)
 {
   char* temp = file - 1;
   uint32_t *pd = thread_current ()->pagedir;
-  void *curr_pg, *prev_pg = NULL;
+  uint32_t curr_pg, prev_pg = -1;
   do{
     temp++;
     curr_pg = pg_no (temp);

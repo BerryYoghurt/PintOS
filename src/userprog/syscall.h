@@ -21,5 +21,7 @@ int syscall_write (int fd, const void *buffer, unsigned length);
 void syscall_seek (int fd, unsigned position);
 unsigned syscall_tell (int fd);
 void syscall_close (int fd);
+mapid_t syscall_mmap (int fd, void *addr);
+void syscall_munmap (mapid_t mapid);
 
 #endif /* userprog/syscall.h */

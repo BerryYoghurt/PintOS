@@ -6,9 +6,30 @@
 #include "threads/pte.h"
 #include "vm/supp-table.h"
 
-static struct hash frame_table;
-static struct lock table_lock;
+#define CLOCK_LOOP(COND, ACT)               \
+        hash_first (&i, &frame_table);      \
+        while (hash_next (&i) && !found)    \
+        {                                   \
+            to_evict = hash_entry (hash_cur(&i), struct fte, hash_elem);           \
+            if(!to_evict->pinned)           \
+            {                               \
+                if(COND)                    \
+                    found = true;           \
+                else                        \
+                    {ACT;}                  \
+            }                               \
+        }
 
+
+static struct hash frame_table;
+/* When this lock is held, some thread is making changes to the hash table */
+static struct lock table_lock;
+/* When this lock is held, some thread is making changes to the frames and whether 
+pages are present. */
+struct lock replacement_lock;
+
+static struct fte *frame_get_address(void *);
+static void private_flush (struct fte *);
 
 /* Obtains the hash of the frame using the physical address */
 static unsigned
@@ -43,14 +64,18 @@ frame_init (void/*size_t frame_cnt, uint8_t starting_at*/)
 }
 
 
-/* Frees the memory allocated for this frame.
- This function must only be called from pagedir_destroy, 
+/* Deletes the entry for this kpage from the table, frees the fte,
+ sets the pte not present, frees the physical frame, and returns back
+ the supplementary entry index to the pte.
+
  if a process creation fails, then only the page and not the frame should be freed
  because the page should not have been mapped yet*/
 void
 frame_free (void *kpage)
 {
-    ASSERT (pagedir_is_destoryed ());
+    ASSERT (pg_ofs (kpage) == 0);
+    //ASSERT (pagedir_is_destoryed ());
+    ASSERT (lock_held_by_current_thread (&replacement_lock));
     //When you implement sharing, only free if no other process is
     //using this frame. You should also remove the current process's pd
 
@@ -72,24 +97,110 @@ frame_free (void *kpage)
     /*if it were null, then it should not have been present and frame free
      should not have been called!*/
     ASSERT(frame != NULL);
+
+    pagedir_clear_page (frame->pd, frame->virtual_address);
+
+    /* return the supp_idx back */
+    pagedir_set_supp (frame->pd, frame->virtual_address, frame->supp_entry);
+
+    /* Free the actual page */
+    palloc_free_page (kpage);
     free((void*) frame);
 }
 
 
 /* Evicts a frame, flushes, removes and frees its entry from the frame table,
- and returns its kernel virtual address. */
-static void *
+ and returns its kernel virtual address.
+ This kernel virtual address is not associated with any process.
+ This frame is effectively pinned as it is not in the frame table to begin with.*/
+void *
 frame_replace (void)
 {
-    return NULL;
+    bool lock_held_here = false;
+    if (!lock_held_by_current_thread (&replacement_lock))
+    {
+        lock_acquire (&replacement_lock);
+        lock_held_here = true;
+    }
+    lock_acquire (&table_lock);
+    
+    //ensure this function is only called when there are no more available user pages
+    ASSERT (palloc_get_multiple (PAL_USER, 1) == NULL);
+
+    struct fte *to_evict = NULL;
+    bool found = false;
+
+    /* The improved clock policy (i.e. the one that uses both D and A) 
+      It is guaranteed that at least one frame is found because at least 
+      the current thread will not access its pages in the meantime*/
+
+
+    struct hash_iterator i;
+
+    /*find A = 0, D = 0*/
+    CLOCK_LOOP (!pagedir_is_accessed (to_evict->pd, to_evict->virtual_address)
+            && !pagedir_is_dirty (to_evict->pd, to_evict->virtual_address),)
+    /* A = 0, D = 1*/
+    CLOCK_LOOP (!pagedir_is_accessed(to_evict->pd, to_evict->virtual_address), 
+                pagedir_set_accessed (to_evict->pd, to_evict->virtual_address, false))
+    /* A = 1, D = 0*/
+    CLOCK_LOOP (!pagedir_is_accessed (to_evict->pd, to_evict->virtual_address)
+            && !pagedir_is_dirty (to_evict->pd, to_evict->virtual_address),)
+    /* A = 1, D = 1*/
+    CLOCK_LOOP (!pagedir_is_accessed(to_evict->pd, to_evict->virtual_address),)
+
+    hash_delete (&frame_table, &to_evict->hash_elem);
+    lock_release (&table_lock);
+
+    /* Edit the pte. The order is important. You must mark the pte not present
+    before flushing so that no modifications to the page can be done after flushing */
+    pagedir_clear_page (to_evict->pd, to_evict->virtual_address);
+    private_flush (to_evict);
+    pagedir_set_supp (to_evict->pd, to_evict->virtual_address, to_evict->supp_entry);
+
+    if(lock_held_here)
+        lock_release (&replacement_lock);
+
+    void *kpage = to_evict->physical_address;
+    free ((void*) to_evict);
+
+    return kpage;
 }
 
 
-/* Flushes the frame depending on its type */
 static void
+private_flush (struct fte *fte)
+{
+    ASSERT (fte != NULL);
+    if (pagedir_is_file (fte->pd, fte->virtual_address))
+    {
+        if (pagedir_is_dirty (fte->pd, fte->virtual_address))
+        {
+            //write to filesys
+            struct file_supp *info = (struct file_supp*)supp_get_entry (
+                                                            thread_current ()->supp_pagedir,
+                                                            fte->supp_entry);
+            /* Must use the kernel virtual address in case the flushing is done
+            from the replacement algorithm */
+            file_write_at (info->file, fte->physical_address, info->bytes, info->offset);
+            pagedir_set_dirty (fte->pd, fte->virtual_address, false);
+        }
+    }
+    else
+    {
+        //write to swap spot
+        //write the swap index in supp_entry
+    } 
+}
+
+/* Flushes the frame depending on its type.
+The replacement lock must be held by the current thread*/
+void
 frame_flush (void *kpage)
 {
-
+    ASSERT (lock_held_by_current_thread (&replacement_lock));
+    struct fte *fte = frame_get_address (kpage);
+    private_flush (fte);
 }
 
 /* Creates a new pinned frame with these associations
@@ -101,6 +212,8 @@ frame_create (uint32_t *pd,
               void *upage, 
               bool pin)
 {
+    ASSERT (pg_ofs(kpage) == 0);
+    ASSERT (pg_ofs(upage) == 0);
     struct fte *frame = (struct fte*) malloc (sizeof(struct fte));
     if(frame == NULL)
         return false;
@@ -109,41 +222,13 @@ frame_create (uint32_t *pd,
     frame->pd = pd;
     frame->pinned = pin;
     frame->supp_entry = pagedir_get_supp (pd, upage);
-    if(!pagedir_set_page (pd, upage, kpage, pagedir_is_writable (pd, upage)))
-    {
-        free (frame);
-        return false;
-    }   
+    pagedir_set_present (pd, upage, kpage);
     lock_acquire (&table_lock);
     hash_insert (&frame_table, &frame->hash_elem);
     lock_release (&table_lock);
     return true;
 }
 
-/* Retruns the frame table entry of the frame which was used
- least recently. Note: the user pool must be full when
- you call this function */
-/*struct fte*
-frame_get_lru (void)
-{
-    struct hash_iterator i;
-    struct fte* lru = NULL;
-
-    lock_acquire (&table_lock);
-    hash_first (&i, &frame_table);
-    while (hash_next (&i))
-    {
-        struct fte* frame = hash_entry (hash_cur(&i), struct fte, hash_elem);
-        
-    }
-    sema_down (&lru->sema);
-    //flush_frame (lru);
-    sema_up (&lru->sema);
-    hash_delete(&frame_table, &lru->hash_elem);
-    lock_release (&table_lock);
-
-    return lru;
-}*/
 
 
 /* Obtains the frame table entry corresponding to this physical address */
@@ -155,42 +240,59 @@ frame_get_address (void* addr)
     return hash_entry(hash_find(&frame_table, &frame.hash_elem), struct fte, hash_elem);
 }
 
-
+/* Unpins the frame that has the address KPAGE*/
 void
 frame_unpin (void *kpage)
 {
+    kpage = (void*)((uint32_t)kpage & PTE_ADDR);
     struct fte* fte = frame_get_address (kpage);
+    ASSERT (fte != NULL);
     ASSERT (fte->pinned);
     fte->pinned = false;
 }
 
-/* Fetches a page if not already there and returns its kernel virtual address.
+
+/* Searches for the page containing UADDR in PD.
+   If it is there, nothing more is done,
+   Else it allocates a new frame and sets up the fte and pte.
    The user address must be mapped */
-void *
+bool
 frame_fetch_page (uint32_t *pd, void *uaddr, bool pin)
 {
     //TODO: pinned being bool might cause some problems if the pinned
     //frame is shared.. 
+    uaddr = (void*)((uint32_t)uaddr & PTE_ADDR);
     ASSERT (pagedir_is_mapped (pd, uaddr));
+
     lock_acquire (&replacement_lock);
-    void *kpage = pagedir_get_page (pd, uaddr);
-    if(kpage == NULL)
+    if(pagedir_is_present (pd, uaddr))
     {
-        //if sharing is enabled, check type to find read only etc
-        kpage = frame_replace ();
-        //switch on type, fetch page and put in kpage.. bla bla bla
+        struct fte *frame = frame_get_address (pagedir_get_page (pd, uaddr));
+        if(pin)
+            frame->pinned = true;
+    }
+    else
+    {
+        //if sharing is enabled, check if files are shared etc
+        void *kpage = palloc_get_page (PAL_USER | PAL_ZERO);
+        /* Populate */
         if(pagedir_is_file (pd, uaddr))
         {
-            
+            struct thread *t = thread_current ();
+            struct file_supp *temp;
+            temp = (struct file_supp *)supp_get_entry (t->supp_pagedir, pagedir_get_supp (pd, uaddr));
+            ASSERT (temp->bytes <= PGSIZE);
+
+            file_read_at (temp->file, kpage, temp->bytes, temp->offset);
         }
         else
         {
-            //fetch from swap partition
+            //swap in
         }
-        frame_create (pd, kpage, uaddr, pin);
+        if(!frame_create (pd, kpage, uaddr, pin))
+            return false;
     }
-    else
-        if(pin)
-            frame_get_address (kpage)->pinned = true;
+
     lock_release (&replacement_lock);
+    return true;
 }

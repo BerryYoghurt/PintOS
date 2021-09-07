@@ -555,6 +555,7 @@ init_thread (struct thread *t, const char *name, int priority)
   t->priority = priority;
   t->executable = NULL;
   list_init(&t->opened_files);
+  list_init(&t->mmapped_files);
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();

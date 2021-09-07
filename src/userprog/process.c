@@ -21,6 +21,7 @@
 #include "threads/vaddr.h"
 #include "vm/frame-table.h"
 #include "vm/supp-table.h"
+#include "vm/mmap.h"
 
 /*A graph to keep track of parent-child relationships*/
 static struct list process_graph;
@@ -170,11 +171,12 @@ void
 process_exit (void)
 {
   struct thread *cur = thread_current ();
-  uint32_t *pd;
+  uint32_t *pd, **supp_pagedir;
 
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
   pd = cur->pagedir;
+  supp_pagedir = cur->supp_pagedir;
   if (pd != NULL) 
     {
       /* Correct ordering here is crucial.  We must set
@@ -186,7 +188,7 @@ process_exit (void)
          that's been freed (and cleared). */
       cur->pagedir = NULL;
       pagedir_activate (NULL);
-      pagedir_destroy (pd); //TODO destroy here the supplementary ptes
+      pagedir_destroy (pd, supp_pagedir); //TODO destroy here the supplementary ptes
       
       /*Question: why do we need to deny write for the whole running duration
         not just for the loading duration? virtual memory? YES*/
@@ -196,8 +198,19 @@ process_exit (void)
       printf("%s: exit(%d)\n",cur->name,cur->as_child->status);
     }
 
+  
+  /* Free memory mapped files */
+  struct list *l = &cur->mmapped_files;
+  while(!list_empty (l))
+  {
+    struct list_elem *e = list_pop_front (l);
+    struct mapping *m = list_entry (e, struct mapping, elem);
+    file_close (m->file);
+    free((void*)m);
+  }
+
   /* Free opened files */
-  struct list * l = &cur->opened_files;
+  l = &cur->opened_files;
   while (!list_empty (l))
   {
     struct list_elem *e = list_pop_front (l);
@@ -537,8 +550,6 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
 /* load() helpers. */
 
-static bool install_page (void *upage, void *kpage, bool writable);
-
 /* Checks whether PHDR describes a valid, loadable segment in
    FILE and returns true if so, false otherwise. */
 static bool
@@ -606,7 +617,8 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
   ASSERT (pg_ofs (upage) == 0);
   ASSERT (ofs % PGSIZE == 0);
 
-  file_seek (file, ofs);
+  struct thread *t = thread_current ();
+
   while (read_bytes > 0 || zero_bytes > 0) 
     {
       /* Calculate how to fill this page.
@@ -615,25 +627,25 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
       size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
       size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
-      /* Get a page of memory. */
-      uint8_t *kpage = palloc_get_page (PAL_USER);
-      if (kpage == NULL)
+      /* Allocate file_supp for VM */
+      struct file_supp *info = (struct file_supp *)malloc (sizeof(struct file_supp));
+      if(info == NULL)
         return false;
+      info->bytes = page_read_bytes;
+      info->file = file;
+      info->offset = ofs;
+      ofs += page_read_bytes;
 
-      /* Load this page. */
-      if (file_read (file, kpage, page_read_bytes) != (int) page_read_bytes)
-        {
-          palloc_free_page (kpage);
-          return false; 
-        }
-      memset (kpage + page_read_bytes, 0, page_zero_bytes);
-
-      /* Add the page to the process's address space. */
-      if (!install_page (upage, kpage, writable)) 
-        {
-          palloc_free_page (kpage);
-          return false; 
-        }
+      /* Create the mapping */
+      bool success = !pagedir_is_mapped (t->pagedir, upage)
+                     && pagedir_set_page (t->pagedir, 
+                                          upage,
+                                          writable,
+                                          true,
+                                          (uint32_t)info);
+      
+      if(!success)
+        return false;
 
       /* Advance. */
       read_bytes -= page_read_bytes;
@@ -653,7 +665,18 @@ setup_stack (const char *cmdline, void **esp)
 
   kpage = palloc_get_page (PAL_USER | PAL_ZERO);
   ASSERT (kpage != NULL);
-  success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
+
+  /* Make sure this page was not mapped, create its supplementary entry,
+  and then add it to the present pages (frames) */
+  struct thread *t = thread_current ();
+  success =  !pagedir_is_mapped (t->pagedir, ((uint8_t *) PHYS_BASE) - PGSIZE)
+          &&  pagedir_set_page (t->pagedir, 
+                                ((uint8_t *) PHYS_BASE) - PGSIZE,
+                                true,
+                                false,
+                                0)
+          && frame_create (t->pagedir, kpage, ((uint8_t *) PHYS_BASE) - PGSIZE, true);
+                    
   if (success)
   {
     int argc = 0, size = strlen(cmdline)+1;
@@ -716,27 +739,3 @@ setup_stack (const char *cmdline, void **esp)
   return success;
 }
 
-/* Adds a mapping from user virtual address UPAGE to kernel
-   virtual address KPAGE to the page table.
-   If WRITABLE is true, the user process may modify the page;
-   otherwise, it is read-only.
-   UPAGE must not already be mapped.
-   KPAGE should probably be a page obtained from the user pool
-   with palloc_get_page().
-   Returns true on success, false if UPAGE is already mapped or
-   if memory allocation fails. */
-static bool
-install_page (void *upage, void *kpage, bool writable)
-{
-  struct thread *t = thread_current ();
-
-  /* Verify that there's not already a page at that virtual
-     address, then map our page there. */
-  if (pagedir_get_page (t->pagedir, upage) == NULL
-          && pagedir_set_page (t->pagedir, upage, kpage, writable))
-    {
-      return frame_create (t->pagedir, kpage, upage);
-    }
-  else
-    return false;
-}

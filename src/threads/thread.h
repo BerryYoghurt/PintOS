@@ -106,6 +106,7 @@ struct thread
     /* Owned by vm/supp-table.c */
     uint32_t **supp_pagedir;            /* List of supplementary page table entries 
                                              (allocated in kernel)*/
+    struct list mmapped_files;
 //#endif
 
     /* Owned by thread.c. */

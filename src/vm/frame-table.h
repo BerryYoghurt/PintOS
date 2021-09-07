@@ -12,19 +12,18 @@ struct fte{
     void* virtual_address;          /* Virtual address of this frame */
     uint32_t *pd;                   /* The page directory this frame is registered in */
                             /*TODO remember the caveat of the kernel accessing the frame*/
-    struct semaphore sema;          /* Semaphore to protect fte for purposes of eviction */
+    bool pinned;          /* I changed the semaphore because there is a replacement lock anyway */
+    uint32_t supp_entry;            /* The index of the supplementary pte */
 };
 
-struct lock replacement_lock;
+extern struct lock replacement_lock;
 
 void frame_init (void);
-//struct fte* frame_get_lru (void);
-void frame_free (void *);
-bool frame_create (uint32_t*, void*, void*, bool);
 void *frame_replace (void);
-void frame_pin (void*);
+void frame_flush (void *kpage);
+void frame_free (void *);
+bool frame_create (uint32_t* pd, void* kpage, void* upage, bool pin);
 void frame_unpin (void*);
-void *frame_fetch_page (uint32_t*, void*, bool);
-void frame_flush (void*);
+bool frame_fetch_page (uint32_t*, void*, bool);
 
 #endif

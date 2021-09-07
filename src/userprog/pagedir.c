@@ -5,6 +5,7 @@
 #include "threads/init.h"
 #include "threads/pte.h"
 #include "threads/palloc.h"
+#include "threads/malloc.h"
 #include "vm/frame-table.h"
 #include "vm/supp-table.h"
 
@@ -25,9 +26,11 @@ pagedir_create (void)
 }
 
 /* Destroys page directory PD, freeing all the pages it
-   references. */
+   references.
+   It also destroys the supplementary page table, frees all its pages
+   and frees any file_supp structs associated with it. */
 void
-pagedir_destroy (uint32_t *pd) 
+pagedir_destroy (uint32_t *pd, uint32_t **supp_pagedir) 
 {
   uint32_t *pde;
 
@@ -54,19 +57,34 @@ pagedir_destroy (uint32_t *pd)
           if (*pte & PTE_P)
           {
             ASSERT(*pte & PTE_U);
-            //TODO flush
-            frame_free (pte_get_page (*pte));
-            palloc_free_page (pte_get_page (*pte));
+            ASSERT (*pte & PTE_M);
+
+            if(*pte & PTE_FILE)
+            {
+              frame_flush (pte_get_page (*pte));
+              frame_free (pte_get_page (*pte));
+              free((void*)supp_get_entry (supp_pagedir, (*pte & PTE_ADDR) >> 12));
+            }
+            else  
+              frame_free (pte_get_page (*pte));
           }
-          else
+          else if(*pte & PTE_M)
           {
-            //TODO, check swap 
+            if(*pte & PTE_FILE)
+            {
+              free((void*)supp_get_entry (supp_pagedir, (*pte & PTE_ADDR)>>12));
+            }
+            else
+            {
+              //free swap spot
+            }
           }
           lock_release (&replacement_lock);
         }
         palloc_free_page (pt);
       }
   palloc_free_page (pd);
+  supp_destroy (supp_pagedir);
 }
 
 /* Returns the address of the page table entry for virtual
@@ -107,25 +125,25 @@ lookup_page (uint32_t *pd, const void *vaddr, bool create)
   return &pt[pt_no (vaddr)];
 }
 
-/* Adds a mapping in page directory PD from user virtual page
-   UPAGE to the physical frame identified by kernel virtual
-   address KPAGE.
+/* Adds a mapping in page directory PD for user virtual page
+   UPAGE with INFO in the corresponding supplementary pte.
    UPAGE must not already be mapped.
-   KPAGE should probably be a page obtained from the user pool
-   with palloc_get_page().
+
    If WRITABLE is true, the new page is read/write;
    otherwise it is read-only.
    Returns true if successful, false if memory allocation
    failed. */
 bool
-pagedir_set_page (uint32_t *pd, void *upage, void *kpage, bool writable)
+pagedir_set_page (uint32_t *pd, 
+                  void *upage, 
+                  bool writable, 
+                  bool file, 
+                  uint32_t info)
 {
   uint32_t *pte;
 
   ASSERT (pg_ofs (upage) == 0);
-  ASSERT (pg_ofs (kpage) == 0);
   ASSERT (is_user_vaddr (upage));
-  ASSERT (vtop (kpage) >> PTSHIFT < init_ram_pages);
   ASSERT (pd != init_page_dir);
 
   pte = lookup_page (pd, upage, true);
@@ -133,7 +151,15 @@ pagedir_set_page (uint32_t *pd, void *upage, void *kpage, bool writable)
   if (pte != NULL) 
     {
       ASSERT ((*pte & PTE_P) == 0);
-      *pte = pte_create_user (kpage, writable);
+      ASSERT ((*pte & PTE_M) == 0);
+      
+      /* This pte could have been mapped before and then unmapped by munmap */
+      uint32_t supp_idx = (*pte)>>12;
+      if(*pte == 0) //never mapped before
+        supp_idx = supp_add_entry (thread_current ()->supp_pagedir, info);
+      else
+        supp_set_entry (thread_current ()->supp_pagedir, supp_idx, info);
+      *pte = pte_create_user (supp_idx, writable, file);
       return true;
     }
   else
@@ -159,6 +185,29 @@ pagedir_get_page (uint32_t *pd, const void *uaddr)
 }
 
 
+/*Marks the page present after associating it with this physical address*/
+void
+pagedir_set_present (uint32_t *pd, const void *upage, const void *kpage)
+{
+  ASSERT (vtop (kpage) >> PTSHIFT < init_ram_pages);
+  ASSERT (pg_ofs (kpage) == 0);
+  ASSERT (pg_ofs (upage) == 0);
+
+  uint32_t *pte = lookup_page (pd, upage, false);
+  ASSERT (*pte & PTE_M);
+  *pte = (*pte & ~PTE_ADDR) | ((uint32_t)vtop(kpage));
+  *pte |= PTE_P;
+}
+
+bool 
+pagedir_is_present (uint32_t *pd, const void *upage)
+{
+  uint32_t *pte = lookup_page (pd, upage, false);
+  ASSERT (*pte & PTE_M);
+  return *pte & PTE_P;
+}
+
+
 /* Returns the index of the supplementary page table entry. 
    The address must be mapped but not present. */
 uint32_t
@@ -166,7 +215,7 @@ pagedir_get_supp (uint32_t *pd, const void *upage)
 {
   uint32_t *pte = lookup_page (pd, upage, false);
   ASSERT (pte != NULL);
-  ASSERT (*pte & PTE_P == 0);
+  ASSERT ((*pte & PTE_P) == 0);
   return (*pte) >> 12;
 }
 
@@ -177,7 +226,7 @@ pagedir_set_supp (uint32_t *pd, const void *upage, uint32_t supp_idx)
 {
   uint32_t *pte = lookup_page (pd, upage, false);
   ASSERT (pte != NULL);
-  ASSERT (*pte & PTE_P == 0);
+  ASSERT ((*pte & PTE_P) == 0);
   *pte = (supp_idx<<12) | (*pte & ~PTE_ADDR);
 }
 
@@ -266,8 +315,23 @@ bool
 pagedir_is_mapped (uint32_t *pd, const void *vpage)
 {
   uint32_t *pte = lookup_page (pd, vpage, false);
-  return pte != NULL;
+  return pte != NULL && (*pte & PTE_M);
 }
+
+
+/* Unmaps the address vpage. The address must not be present. 
+  All other bits stay the same. */
+void
+pagedir_set_unmapped (uint32_t *pd, const void *vpage)
+{
+  ASSERT (pd != NULL);
+  uint32_t *pte = lookup_page (pd, vpage, false);
+  ASSERT (*pte & PTE_M);
+  ASSERT ((*pte & PTE_P) == 0);
+  ASSERT (*pte & PTE_FILE); //we only unmap files
+  *pte &= ~(uint32_t)PTE_M;
+}
+
 
 /* Returns true if writable. */
 bool
@@ -282,6 +346,7 @@ bool
 pagedir_is_file (uint32_t *pd, const void *upage)
 {
   uint32_t *pte = lookup_page (pd, upage, false);
+  ASSERT (*pte & PTE_M);
   return *pte & PTE_FILE;
 }
 
