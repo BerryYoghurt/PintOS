@@ -29,6 +29,7 @@
 #include "userprog/syscall.h"
 #include "userprog/tss.h"
 #include "vm/frame-table.h"
+#include "vm/swap.h"
 #else
 #include "tests/threads/tests.h"
 #endif
@@ -128,6 +129,8 @@ main (void)
   ide_init ();
   locate_block_devices ();
   filesys_init (format_filesys);
+  /* Initialise the swap partition */
+  swap_init ();
 #endif
 
   printf ("Boot complete.\n");
@@ -136,6 +139,11 @@ main (void)
   run_actions (argv);
 
   /* Finish up. */
+/* do I need these?
+  #ifdef VM
+    frame_done ();
+    swap_done ();
+  #endif  */
   shutdown ();
   thread_exit ();
 }

@@ -11,7 +11,7 @@ struct fte{
     void* physical_address;         /* Key to use in hash table */
     void* virtual_address;          /* Virtual address of this frame */
     uint32_t *pd;                   /* The page directory this frame is registered in */
-                            /*TODO remember the caveat of the kernel accessing the frame*/
+    uint32_t **supp_pd;             /* The associated supplementary page directory */
     bool pinned;          /* I changed the semaphore because there is a replacement lock anyway */
     uint32_t supp_entry;            /* The index of the supplementary pte */
 };
@@ -22,8 +22,9 @@ void frame_init (void);
 void *frame_replace (void);
 void frame_flush (void *kpage);
 void frame_free (void *);
-bool frame_create (uint32_t* pd, void* kpage, void* upage, bool pin);
+bool frame_create (void* kpage, void* upage, bool pin);
 void frame_unpin (void*);
-bool frame_fetch_page (uint32_t*, void*, bool);
+bool frame_fetch_page (void*, bool);
+void frame_done (void);
 
 #endif

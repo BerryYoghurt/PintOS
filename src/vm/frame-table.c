@@ -5,6 +5,7 @@
 #include "threads/vaddr.h"
 #include "threads/pte.h"
 #include "vm/supp-table.h"
+#include "swap.h"
 
 #define CLOCK_LOOP(COND, ACT)               \
         hash_first (&i, &frame_table);      \
@@ -172,14 +173,16 @@ static void
 private_flush (struct fte *fte)
 {
     ASSERT (fte != NULL);
-    if (pagedir_is_file (fte->pd, fte->virtual_address))
+    if (pagedir_is_filesys (fte->pd, fte->virtual_address))
     {
         if (pagedir_is_dirty (fte->pd, fte->virtual_address))
         {
             //write to filesys
             struct file_supp *info = (struct file_supp*)supp_get_entry (
-                                                            thread_current ()->supp_pagedir,
+                                                            fte->supp_pd,
                                                             fte->supp_entry);
+            ASSERT (!(info->executable && pagedir_is_writable (fte->pd, fte->virtual_address)));
+            
             /* Must use the kernel virtual address in case the flushing is done
             from the replacement algorithm */
             file_write_at (info->file, fte->physical_address, info->bytes, info->offset);
@@ -188,8 +191,8 @@ private_flush (struct fte *fte)
     }
     else
     {
-        //write to swap spot
-        //write the swap index in supp_entry
+        if(!swap_out (fte->physical_address, fte->supp_pd, fte->supp_entry))
+            PANIC ("Could not swap out stack page!");
     } 
 }
 
@@ -207,8 +210,7 @@ frame_flush (void *kpage)
  and inserts it into the table.
  It also marks the pte present.*/
 bool
-frame_create (uint32_t *pd, 
-              void *kpage, 
+frame_create (void *kpage, 
               void *upage, 
               bool pin)
 {
@@ -217,12 +219,16 @@ frame_create (uint32_t *pd,
     struct fte *frame = (struct fte*) malloc (sizeof(struct fte));
     if(frame == NULL)
         return false;
+    /* A frame is always created on behalf of the current thread,
+    whether due to stack (creation or growth), executable, or page fault.*/
+    struct thread *t = thread_current ();
     frame->physical_address = kpage;
     frame->virtual_address = upage;
-    frame->pd = pd;
+    frame->pd = t->pagedir;
+    frame->supp_pd = t->supp_pagedir;
     frame->pinned = pin;
-    frame->supp_entry = pagedir_get_supp (pd, upage);
-    pagedir_set_present (pd, upage, kpage);
+    frame->supp_entry = pagedir_get_supp (t->pagedir, upage);
+    pagedir_set_present (t->pagedir, upage, kpage);
     lock_acquire (&table_lock);
     hash_insert (&frame_table, &frame->hash_elem);
     lock_release (&table_lock);
@@ -257,42 +263,64 @@ frame_unpin (void *kpage)
    Else it allocates a new frame and sets up the fte and pte.
    The user address must be mapped */
 bool
-frame_fetch_page (uint32_t *pd, void *uaddr, bool pin)
+frame_fetch_page (void *uaddr, bool pin)
 {
     //TODO: pinned being bool might cause some problems if the pinned
     //frame is shared.. 
     uaddr = (void*)((uint32_t)uaddr & PTE_ADDR);
-    ASSERT (pagedir_is_mapped (pd, uaddr));
+    /* Frame fetch (whether in syscalls or in page faults) is always
+    done on behalf of the current thread. */
+    struct thread *t = thread_current ();
+    ASSERT (pagedir_is_mapped (t->pagedir, uaddr));
 
     lock_acquire (&replacement_lock);
-    if(pagedir_is_present (pd, uaddr))
+    if(pagedir_is_present (t->pagedir, uaddr))
     {
-        struct fte *frame = frame_get_address (pagedir_get_page (pd, uaddr));
         if(pin)
-            frame->pinned = true;
+            frame_get_address (pagedir_get_page (t->pagedir, uaddr))->pinned = true;
     }
     else
     {
         //if sharing is enabled, check if files are shared etc
         void *kpage = palloc_get_page (PAL_USER | PAL_ZERO);
         /* Populate */
-        if(pagedir_is_file (pd, uaddr))
+        if(pagedir_is_filesys (t->pagedir, uaddr))
         {
-            struct thread *t = thread_current ();
             struct file_supp *temp;
-            temp = (struct file_supp *)supp_get_entry (t->supp_pagedir, pagedir_get_supp (pd, uaddr));
+            temp = (struct file_supp *)supp_get_entry (t->supp_pagedir,
+                                                       pagedir_get_supp (t->pagedir, uaddr));
             ASSERT (temp->bytes <= PGSIZE);
 
             file_read_at (temp->file, kpage, temp->bytes, temp->offset);
+
+            /* Next time, flush to and fetch from swap */
+            if(temp->executable && pagedir_is_writable (t->pagedir, uaddr))
+            {
+                pagedir_set_swappable (t->pagedir, uaddr);
+                supp_set_entry (t->supp_pagedir,
+                                pagedir_get_supp (t->pagedir, uaddr),
+                                0);
+                free ((void*)temp);
+                ASSERT (!pagedir_is_filesys (t->pagedir, uaddr));
+                ASSERT (pagedir_is_mapped (t->pagedir, uaddr));
+            }
         }
         else
         {
-            //swap in
+            swap_in (kpage, supp_get_entry (t->supp_pagedir,
+                                            pagedir_get_supp (t->pagedir, uaddr)));
         }
-        if(!frame_create (pd, kpage, uaddr, pin))
+        if(!frame_create (kpage, uaddr, pin))
             return false;
     }
 
     lock_release (&replacement_lock);
     return true;
+}
+
+void
+frame_done ()
+{
+    ASSERT (hash_empty (&frame_table));
+    hash_destroy (&frame_table, NULL);
 }

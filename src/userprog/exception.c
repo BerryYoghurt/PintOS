@@ -180,7 +180,7 @@ page_fault (struct intr_frame *f)
   }
   else if (pagedir_is_mapped (t->pagedir, fault_addr)) //page is just not present
   {
-      if(!frame_fetch_page (t->pagedir, fault_addr, false))
+      if(!frame_fetch_page (fault_addr, false))
          PANIC("Frame fetch failed in syscall!");
   }
   else if (stack_grows)
@@ -193,12 +193,12 @@ page_fault (struct intr_frame *f)
                                        true, 
                                        false, 
                                        0)
-                   && frame_create (t->pagedir, 
-                                    kpage, 
+                   && frame_create (kpage, 
                                     (void*)((uint32_t)fault_addr & PTE_ADDR), 
                                     false);
      if(!success)
         PANIC ("Unable to create frame for stack growth!");
+     ASSERT (pagedir_is_mapped (t->pagedir, fault_addr));
   }
   else
   {

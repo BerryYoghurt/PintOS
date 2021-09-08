@@ -8,6 +8,7 @@
 #include "threads/malloc.h"
 #include "vm/frame-table.h"
 #include "vm/supp-table.h"
+#include "vm/swap.h"
 
 static uint32_t *active_pd (void);
 static void invalidate_pagedir (uint32_t *);
@@ -59,7 +60,7 @@ pagedir_destroy (uint32_t *pd, uint32_t **supp_pagedir)
             ASSERT(*pte & PTE_U);
             ASSERT (*pte & PTE_M);
 
-            if(*pte & PTE_FILE)
+            if(*pte & PTE_FILESYS)
             {
               frame_flush (pte_get_page (*pte));
               frame_free (pte_get_page (*pte));
@@ -70,13 +71,13 @@ pagedir_destroy (uint32_t *pd, uint32_t **supp_pagedir)
           }
           else if(*pte & PTE_M)
           {
-            if(*pte & PTE_FILE)
+            if(*pte & PTE_FILESYS)
             {
               free((void*)supp_get_entry (supp_pagedir, (*pte & PTE_ADDR)>>12));
             }
             else
             {
-              //free swap spot
+              swap_free (supp_get_entry (supp_pagedir, (*pte & PTE_ADDR) >> 12));
             }
           }
           lock_release (&replacement_lock);
@@ -328,7 +329,7 @@ pagedir_set_unmapped (uint32_t *pd, const void *vpage)
   uint32_t *pte = lookup_page (pd, vpage, false);
   ASSERT (*pte & PTE_M);
   ASSERT ((*pte & PTE_P) == 0);
-  ASSERT (*pte & PTE_FILE); //we only unmap files
+  ASSERT (*pte & PTE_FILESYS); //we only unmap files
   *pte &= ~(uint32_t)PTE_M;
 }
 
@@ -341,15 +342,30 @@ pagedir_is_writable (uint32_t *pd, const void *upage)
   return *pte & PTE_W;
 }
 
-
+/* Should this page be read/written from filesys or from swap? */
 bool
-pagedir_is_file (uint32_t *pd, const void *upage)
+pagedir_is_filesys (uint32_t *pd, const void *upage)
 {
   uint32_t *pte = lookup_page (pd, upage, false);
   ASSERT (*pte & PTE_M);
-  return *pte & PTE_FILE;
+  return *pte & PTE_FILESYS;
 }
 
+/* Used only for writable segments of an executable. Turns this pte
+into a swappable entry (since writable segments of an executable can have
+data written into them. However, they are written back to swap and not 
+to the original file both because the file is denied writes, and this process
+could need this data later. */
+void
+pagedir_set_swappable (uint32_t *pd, const void *upage)
+{
+  uint32_t *pte = lookup_page (pd, upage, false);
+  ASSERT (*pte & PTE_M);
+  ASSERT (!(*pte & PTE_P));
+  ASSERT (*pte & PTE_FILESYS);
+  ASSERT (*pte & PTE_W);
+  *pte &= ~(uint32_t)PTE_FILESYS;
+}
 
 /* Loads page directory PD into the CPU's page directory base
    register. */

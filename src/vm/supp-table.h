@@ -24,6 +24,7 @@ struct file_supp{
     struct file *file;
     uint32_t offset;    /* The offset from which to read/write */
     uint32_t bytes;     /* The number of bytes to read/write (and pad the rest with zero) */
+    bool executable;    /* 1=executable of the owning process, 0=mmap'd file*/
 };
 
 uint32_t **supp_table_create (void);

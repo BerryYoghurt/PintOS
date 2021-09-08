@@ -634,6 +634,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
       info->bytes = page_read_bytes;
       info->file = file;
       info->offset = ofs;
+      info->executable = true;
       ofs += page_read_bytes;
 
       /* Create the mapping */
@@ -675,7 +676,7 @@ setup_stack (const char *cmdline, void **esp)
                                 true,
                                 false,
                                 0)
-          && frame_create (t->pagedir, kpage, ((uint8_t *) PHYS_BASE) - PGSIZE, true);
+          && frame_create (kpage, ((uint8_t *) PHYS_BASE) - PGSIZE, true);
                     
   if (success)
   {

@@ -318,7 +318,7 @@ validate_buffer (const void *buffer, unsigned int length, const bool write)
         thread_exit();
       }
       
-      if(!frame_fetch_page (pd, (void*)((uint32_t)temp & PTE_ADDR), true))
+      if(!frame_fetch_page ((void*)((uint32_t)temp & PTE_ADDR), true))
         PANIC ("Frame fetch failed in syscall");
 
       temp = (char*)pg_round_up((void*)temp + 1);
@@ -418,6 +418,7 @@ syscall_mmap (int fd, void *addr)
     info->file = file;
     info->offset = (uint32_t)curr_pg - (uint32_t)addr;
     info->bytes = (size - info->offset > PGSIZE) ? PGSIZE : size - info->offset;
+    info->executable = false;
     if(!pagedir_set_page (t->pagedir, curr_pg, true, true, (uint32_t)info))
     {
       free(info);
@@ -483,7 +484,7 @@ syscall_munmap (mapid_t mapid)
       (uint32_t)curr_pg < (uint32_t)m->addr + size; 
       curr_pg += PGSIZE)
     {
-      ASSERT (pagedir_is_file (t->pagedir, curr_pg));
+      ASSERT (pagedir_is_filesys (t->pagedir, curr_pg));
       lock_acquire (&replacement_lock);
       if(pagedir_is_present (t->pagedir, curr_pg))
         {
@@ -521,7 +522,7 @@ validate_filename (char * file)
     }
     if(curr_pg != prev_pg)
     {
-      if(!frame_fetch_page (pd, (void*)((uint32_t)temp & PTE_ADDR), true))
+      if(!frame_fetch_page ((void*)((uint32_t)temp & PTE_ADDR), true))
         PANIC ("Frame fetch failed in syscall!");
     }
     prev_pg = curr_pg;

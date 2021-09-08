@@ -73,7 +73,7 @@ static inline uintptr_t pd_no (const void *va) {
 #define PTE_U 0x4               /* 1=user/kernel, 0=kernel only. */
 #define PTE_A 0x20              /* 1=accessed, 0=not acccessed. */
 #define PTE_D 0x40              /* 1=dirty, 0=not dirty (PTEs only). */
-#define PTE_FILE 0x200          /* 1=file page, 0=stack page (PTEs only). */
+#define PTE_FILESYS 0x200       /* 1=r/w to filesys, 0=r/w to swap (PTEs only). */
 #define PTE_M 0x400             /* 1=mapped user pte, 0=not mapped */
 
 /* Returns a PDE that points to page table PT. */
@@ -104,8 +104,8 @@ static inline uint32_t pte_create_kernel (void *page, bool writable) {
    The page will be usable by both user and kernel code. 
    It is marked mapped and the supplementary page table entry is registered. 
    It is not, however, marked present*/
-static inline uint32_t pte_create_user (uint32_t supp_idx, bool writable, bool file) {
-  return PTE_U | PTE_M | supp_idx << 12 | (writable ? PTE_W : 0) | (file ? PTE_FILE : 0);
+static inline uint32_t pte_create_user (uint32_t supp_idx, bool writable, bool filesys) {
+  return PTE_U | PTE_M | supp_idx << 12 | (writable ? PTE_W : 0) | (filesys ? PTE_FILESYS : 0);
 }
 
 /* Returns a pointer to the page that page table entry PTE points
