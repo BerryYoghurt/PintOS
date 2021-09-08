@@ -156,13 +156,12 @@ page_fault (struct intr_frame *f)
   not_present = (f->error_code & PF_P) == 0;
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
-  stack_grows =   (uint32_t)f->esp - (uint32_t)fault_addr == 4
-               || (uint32_t)f->esp - (uint32_t)fault_addr == 32 
-               || (uint32_t)fault_addr >= (uint32_t)f->esp;
+  /* Stack growth should only happen from a user context */
+  stack_grows = user 
+               &&(   (uint32_t)f->esp - (uint32_t)fault_addr == 4
+                  || (uint32_t)f->esp - (uint32_t)fault_addr == 32 
+                  || (uint32_t)fault_addr >= (uint32_t)f->esp );
 
-  /* To implement virtual memory, delete the rest of the function
-     body, and replace it with code that brings in the page to
-     which fault_addr refers. */
   /*printf ("Page fault at %p: %s error %s page in %s context.\n",
           fault_addr,
           not_present ? "not present" : "rights violation",

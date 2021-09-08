@@ -21,9 +21,11 @@ static void syscall_handler (struct intr_frame *);
 static void validate_filename (char *);
 static void unpin_filename (char *);
 static void validate_four_bytes (void*);
-static void validate_buffer (const void*, unsigned);
+static void validate_buffer (const void*, unsigned, const bool);
 static void unpin_buffer (const void*, unsigned);
 static struct file *find_file (int);
+static list_predicate_func file_with_descriptor;
+static list_predicate_func mapping_with_id;
 
 static struct lock filesys_lock; /*A lock to be used everywhere the filesystem is 
                                    accessed because I have no idea how it works or what
@@ -184,9 +186,12 @@ syscall_open (char *file)
   if(f == NULL)
     return -1;
 
-  int descriptor = list_size (&t->opened_files) + 2; //for now
-  list_push_back (&t->opened_files, &f->elem);
-  return descriptor;
+  if(list_empty (&t->opened_files))
+    f->descriptor = 2;
+  else
+    f->descriptor = 1 + list_entry(list_begin (&t->opened_files), struct file, elem)->descriptor;
+  list_push_front (&t->opened_files, &f->elem);
+  return f->descriptor;
 }
 
 int 
@@ -201,21 +206,23 @@ syscall_filesize (int fd)
   return ret;
 }
 
+
+/* Predicate to pick struct file with descriptor equal to AUX */
+static bool
+file_with_descriptor (const struct list_elem * e, void *aux)
+{
+  struct file *f = list_entry (e, struct file, elem);
+  return f->descriptor == (int) aux;
+}
+
 static struct file *
 find_file (const int fd)
 {
   struct thread * t = thread_current ();
-  int i = 2;
-  for(struct list_elem *e = list_begin(&t->opened_files);
-      e != list_end(&t->opened_files);
-      e = list_next (e), i++)
-    {
-      if (i == fd)
-      {
-        return list_entry (e, struct file, elem);
-      }
-    }
-  return NULL;
+  struct list_elem *e = list_find (&t->opened_files, file_with_descriptor, (void*)fd);
+  if(e == NULL)
+    return NULL;
+  return list_entry (e, struct file, elem);
 }
 
 int 
@@ -227,7 +234,7 @@ syscall_read (int fd, void *buffer, unsigned length)
   }
   else
   {
-    validate_buffer (buffer, length);
+    validate_buffer (buffer, length, true);
 
     if(fd == 0)
     {
@@ -264,7 +271,7 @@ syscall_write (int fd, const void *buffer, unsigned length)
   }
   else
   { 
-    validate_buffer (buffer, length);
+    validate_buffer (buffer, length, false);
 
     if(fd == 1)
     {
@@ -288,8 +295,13 @@ syscall_write (int fd, const void *buffer, unsigned length)
   }
 }
 
+
+/* If a process tries to write to read-only page, it should be killed. 
+I had thought this could be done in the fault handler (and indeed it can), but
+I think it's better to validate that here so that if any other write happens
+to a read only page from the kernel I can detect it (because THAT will certainly be a bug)*/
 static void
-validate_buffer (const void *buffer, unsigned int length)
+validate_buffer (const void *buffer, unsigned int length, const bool write)
 {
     if(buffer == NULL)
       thread_exit();
@@ -299,7 +311,9 @@ validate_buffer (const void *buffer, unsigned int length)
 
     while(temp < (char*)buffer+length)
     {
-      if(temp >= (char*)PHYS_BASE || !pagedir_is_mapped(pd,temp))
+      if(temp >= (char*)PHYS_BASE 
+      || !pagedir_is_mapped(pd,temp)
+      || (write && !pagedir_is_writable (pd, temp)))
       {
         thread_exit();
       }
@@ -373,7 +387,7 @@ syscall_close (int fd)
 mapid_t
 syscall_mmap (int fd, void *addr)
 {
-  int ans = -1;
+  int ans = -1, allocated = 0;
   if(addr == (void*)0 || pg_ofs(addr) != 0)
     return -1;
 
@@ -390,7 +404,7 @@ syscall_mmap (int fd, void *addr)
   bool success = true;
   for (void *curr_pg = addr; (uint32_t)curr_pg < (uint32_t)addr + size; curr_pg += PGSIZE)
   {
-    if (pagedir_is_mapped (t->pagedir, curr_pg))
+    if (curr_pg >= PHYS_BASE || pagedir_is_mapped (t->pagedir, curr_pg))
     {
       success = false;
       goto done;
@@ -402,7 +416,7 @@ syscall_mmap (int fd, void *addr)
       goto done;
     }
     info->file = file;
-    info->offset = (uint32_t)addr - (uint32_t)curr_pg;
+    info->offset = (uint32_t)curr_pg - (uint32_t)addr;
     info->bytes = (size - info->offset > PGSIZE) ? PGSIZE : size - info->offset;
     if(!pagedir_set_page (t->pagedir, curr_pg, true, true, (uint32_t)info))
     {
@@ -410,6 +424,7 @@ syscall_mmap (int fd, void *addr)
       success = false;
       goto done;
     }
+    ++allocated;
   }
 
   struct mapping *m = (struct mapping *) malloc (sizeof(struct mapping));
@@ -420,22 +435,22 @@ syscall_mmap (int fd, void *addr)
   }
   m->file = file;
   m->addr = addr;
-  ans = list_size (&t->mmapped_files);
-  list_push_back (&t->mmapped_files, &m->elem);
+  if(list_empty (&t->mmapped_files))
+    m->id = ans = 0;
+  else
+    m->id = ans = 1 + list_entry (list_begin (&t->mmapped_files),
+                                  struct mapping,
+                                  elem)->id;
+  list_push_front (&t->mmapped_files, &m->elem);
 
   done:
     if(!success)
     {
-      for (void *curr_pg = addr; (uint32_t)curr_pg < (uint32_t)addr + size; curr_pg += PGSIZE)
+      for (void *curr_pg = addr; allocated-- ; curr_pg += PGSIZE)
         {
-          if(pagedir_is_mapped (t->pagedir, curr_pg))
-          {
-            free((void *)supp_get_entry(t->supp_pagedir, 
-                                        pagedir_get_supp(t->pagedir, curr_pg)));
-            pagedir_set_unmapped (t->pagedir, curr_pg);
-          }
-          else
-            break;
+          free((void *)supp_get_entry(t->supp_pagedir, 
+                                      pagedir_get_supp(t->pagedir, curr_pg)));
+          pagedir_set_unmapped (t->pagedir, curr_pg);
         }   
       file_close (file);
     }
@@ -444,27 +459,23 @@ syscall_mmap (int fd, void *addr)
 }
 
 
+static bool
+mapping_with_id (const struct list_elem *e, void *aux)
+{
+  struct mapping *m = list_entry (e, struct mapping, elem);
+  return m->id == (int)aux;
+}
+
 void
 syscall_munmap (mapid_t mapid)
 {
-  mapid_t i = 0;
-  struct mapping *m = NULL;
   struct thread *t = thread_current ();
-  bool found = false;
-  for(struct list_elem *e = list_begin (&t->mmapped_files);
-      e != list_end (&t->mmapped_files);
-      e = list_next (e), ++i)
-    {
-      m = list_entry (e, struct mapping, elem);
-      if(i == mapid)
-      {
-        found = true;
-        break;
-      } 
-    }
-    
-  if(!found)
+  struct list_elem *e = list_find (&t->mmapped_files,
+                                    mapping_with_id,
+                                    (void*)mapid);
+  if(e == NULL)
     return;
+  struct mapping *m = list_entry (e, struct mapping, elem);
 
   uint32_t size = file_length (m->file);
   void *kpage;

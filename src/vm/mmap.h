@@ -6,6 +6,7 @@ struct mapping
   struct list_elem elem;
   struct file *file;
   void *addr;
+  int id;
 };
 
 #endif
